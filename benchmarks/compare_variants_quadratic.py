@@ -63,17 +63,23 @@ def run_holograd_variant(
 
     config = CoordinatorConfig(
         dimension=dim,
-        num_workers=num_workers,
-        proofs_per_step=num_workers,
+        num_workers=K,
+        proofs_per_step=K,
         learning_rate=lr,
         use_momentum_centric=use_momentum_centric,
         momentum_warmup_steps=5 if use_momentum_centric else 0,
         use_adc=use_adc,
         adc_rank=32 if use_adc else 0,
+        momentum=0.0,
+        max_grad_norm=float("inf"),
     )
 
     coord = Coordinator(config)
-    workers = [Worker(WorkerConfig(worker_id=i, dimension=dim)) for i in range(num_workers)]
+    workers = [Worker(WorkerConfig(worker_id=i, dimension=dim)) for i in range(K)]
+
+    if use_adc and coord.codebook is not None:
+        for w in workers:
+            w.set_codebook(coord.codebook)
 
     params = np.random.randn(dim).astype(np.float32)
     coord.set_parameters(params)
@@ -88,9 +94,11 @@ def run_holograd_variant(
         tasks = coord.publish_tasks(step=step)
 
         gradient = 2 * coord._current_params
-        proofs = [
-            w.compute_proof(tasks[i % len(tasks)], gradient=gradient) for i, w in enumerate(workers)
-        ]
+
+        if use_adc and coord.codebook is not None:
+            coord.codebook.update(gradient)
+
+        proofs = [w.compute_proof(tasks[i], gradient=gradient) for i, w in enumerate(workers)]
 
         for proof in proofs:
             coord.collect_proof(proof)

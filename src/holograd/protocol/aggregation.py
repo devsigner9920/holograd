@@ -32,6 +32,7 @@ class RobustAggregator:
         scalars: List[float],
         directions: List[NDArray[np.float32]],
         scale_factor: float = 1.0,
+        effective_dimension: int | None = None,
     ) -> AggregationResult:
         if len(scalars) != len(directions):
             raise ValueError("scalars and directions must have same length")
@@ -42,12 +43,26 @@ class RobustAggregator:
         n = len(scalars)
         scalars_array = np.array(scalars, dtype=np.float32)
 
-        if self.method == "mean":
-            return self._aggregate_mean(scalars_array, directions, scale_factor, n)
-        elif self.method == "median":
-            return self._aggregate_median(scalars_array, directions, scale_factor, n)
+        # Variance correction: sqrt(K / effective_dim)
+        # For random directions: effective_dim = D (full dimension)
+        # For ADC: effective_dim = rank (low-rank subspace)
+        if effective_dimension is not None and effective_dimension > 0:
+            variance_correction = float(np.sqrt(n / effective_dimension))
         else:
-            return self._aggregate_trimmed_mean(scalars_array, directions, scale_factor, n)
+            variance_correction = 1.0
+
+        if self.method == "mean":
+            return self._aggregate_mean(
+                scalars_array, directions, scale_factor, n, variance_correction
+            )
+        elif self.method == "median":
+            return self._aggregate_median(
+                scalars_array, directions, scale_factor, n, variance_correction
+            )
+        else:
+            return self._aggregate_trimmed_mean(
+                scalars_array, directions, scale_factor, n, variance_correction
+            )
 
     def _aggregate_mean(
         self,
@@ -55,6 +70,7 @@ class RobustAggregator:
         directions: List[NDArray[np.float32]],
         scale_factor: float,
         n: int,
+        variance_correction: float = 1.0,
     ) -> AggregationResult:
         dimension = directions[0].shape[0]
         gradient = np.zeros(dimension, dtype=np.float32)
@@ -62,7 +78,7 @@ class RobustAggregator:
         for scalar, direction in zip(scalars, directions):
             gradient += scalar * direction
 
-        gradient = (scale_factor / n) * gradient
+        gradient = (scale_factor / n) * variance_correction * gradient
 
         return AggregationResult(
             gradient=gradient,
@@ -79,13 +95,14 @@ class RobustAggregator:
         directions: List[NDArray[np.float32]],
         scale_factor: float,
         n: int,
+        variance_correction: float = 1.0,
     ) -> AggregationResult:
         dimension = directions[0].shape[0]
         directions_array = np.stack(directions, axis=0)
 
         weighted = scalars[:, np.newaxis] * directions_array
         gradient = np.median(weighted, axis=0).astype(np.float32)
-        gradient = scale_factor * gradient
+        gradient = scale_factor * variance_correction * gradient
 
         return AggregationResult(
             gradient=gradient,
@@ -102,11 +119,12 @@ class RobustAggregator:
         directions: List[NDArray[np.float32]],
         scale_factor: float,
         n: int,
+        variance_correction: float = 1.0,
     ) -> AggregationResult:
         trim_count = int(n * self.tau)
 
         if trim_count == 0 or 2 * trim_count >= n:
-            return self._aggregate_mean(scalars, directions, scale_factor, n)
+            return self._aggregate_mean(scalars, directions, scale_factor, n, variance_correction)
 
         sorted_indices = np.argsort(scalars)
         trimmed_low = sorted_indices[:trim_count].tolist()
@@ -124,7 +142,7 @@ class RobustAggregator:
             kept_scalars.append(float(scalars[idx]))
 
         k_prime = len(keep_indices)
-        gradient = (scale_factor / k_prime) * gradient
+        gradient = (scale_factor / k_prime) * variance_correction * gradient
 
         return AggregationResult(
             gradient=gradient,

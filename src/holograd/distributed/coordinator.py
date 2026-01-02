@@ -102,6 +102,10 @@ class Coordinator:
             and self._momentum_direction is not None
         )
 
+        # During ADC warmup, use random directions to get better gradient estimates
+        adc_warmed_up = self._adc_codebook is not None and self._adc_codebook.is_warmed_up
+        use_adc_this_step = self.config.use_adc and adc_warmed_up and not use_momentum
+
         tasks = []
         for worker_id in range(self.config.num_workers):
             seed = self._commitment_chain.get_worker_seed(
@@ -118,7 +122,7 @@ class Coordinator:
                 param_commitment=self.state.param_commitment,
                 batch_commitment=self.state.batch_commitment,
                 codebook_commitment=codebook_commitment,
-                use_adc=self.config.use_adc and not use_momentum,
+                use_adc=use_adc_this_step,
                 use_momentum=use_momentum,
                 momentum_direction=self._momentum_direction if use_momentum else None,
                 timestamp=time.time(),
@@ -157,11 +161,14 @@ class Coordinator:
         scalars = [p.scalar for p in proofs]
         directions = []
 
+        adc_warmed_up = self._adc_codebook is not None and self._adc_codebook.is_warmed_up
+        use_adc_for_reconstruction = self.config.use_adc and adc_warmed_up
+
         for proof in proofs:
             if proof.adc_projection is not None and self._adc_codebook is not None:
                 direction = self._adc_codebook.reconstruct_direction(proof.adc_projection)
             else:
-                if self.config.use_adc and self._adc_codebook is not None:
+                if use_adc_for_reconstruction and self._adc_codebook is not None:
                     result = self._adc_codebook.generate_direction(proof.seed)
                 else:
                     result = self._direction_gen.generate(proof.seed)
@@ -169,12 +176,16 @@ class Coordinator:
 
             directions.append(direction)
 
-        if self.config.use_adc and self._adc_codebook is not None:
+        if use_adc_for_reconstruction and self._adc_codebook is not None:
             scale_factor = self._adc_codebook.get_scale_factor()
+            effective_dimension = self.config.adc_rank
         else:
             scale_factor = self._direction_gen.scale_factor
+            effective_dimension = self.config.dimension
 
-        agg_result = self._aggregator.aggregate(scalars, directions, scale_factor)
+        agg_result = self._aggregator.aggregate(
+            scalars, directions, scale_factor, effective_dimension
+        )
 
         self.state.steps_completed += 1
         self.state.total_proofs_processed += len(proofs)

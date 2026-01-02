@@ -189,6 +189,59 @@ class HoloGradTrainer:
 
         return gradient_fn
 
+    def _compute_true_gradient(self, batch: BatchData) -> NDArray[np.float32]:
+        if not TORCH_AVAILABLE:
+            raise RuntimeError("PyTorch required for true gradient computation")
+
+        input_ids_t = torch.tensor(batch.input_ids, dtype=torch.long)
+        labels_t = torch.tensor(batch.labels, dtype=torch.long)
+        params_np = self.model.get_flat_params()
+        params_t = torch.tensor(params_np, dtype=torch.float32, requires_grad=True)
+
+        params_dict = self.model.flat_params_to_torch_dict(params_t)
+        loss = self.model.compute_loss_torch(input_ids_t, labels_t, params_dict)
+        loss.backward()
+
+        return params_t.grad.numpy().astype(np.float32)
+
+    def bootstrap_adc(
+        self,
+        num_steps: int = 10,
+        lr: Optional[float] = None,
+    ) -> List[float]:
+        if self._coordinator.codebook is None:
+            return []
+
+        bootstrap_lr = lr or self.config.protocol.learning_rate
+        losses = []
+        train_iter = iter(self.train_loader)
+
+        for step in range(num_steps):
+            try:
+                batch = next(train_iter)
+            except StopIteration:
+                train_iter = iter(self.train_loader)
+                batch = next(train_iter)
+
+            gradient = self._compute_true_gradient(batch)
+            self._coordinator.codebook.update(gradient)
+
+            params = self.model.get_flat_params()
+            grad_norm = np.linalg.norm(gradient)
+            if grad_norm > self.config.training.max_grad_norm:
+                gradient = gradient * (self.config.training.max_grad_norm / grad_norm)
+
+            new_params = params - bootstrap_lr * gradient
+            self.model.set_flat_params(new_params)
+
+            loss = self.model.compute_loss(batch.input_ids, batch.labels)
+            losses.append(loss)
+            self.state.training_losses.append(loss)
+            self.state.step += 1
+            self.state.total_tokens += batch.input_ids.size
+
+        return losses
+
     def train_step(self, batch: BatchData) -> StepMetrics:
         step_start = time.perf_counter()
 

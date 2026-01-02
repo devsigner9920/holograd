@@ -242,7 +242,9 @@ class ADCCodebook:
         return float(projected_norm_sq / gradient_norm_sq)
 
     def get_scale_factor(self) -> float:
-        return float(self.dimension)
+        # ADC directions live in r-dimensional subspace
+        # Scale factor is r (rank), not D (dimension)
+        return float(self.rank)
 
     def reset(self, seed: Optional[int] = None) -> None:
         self._U = self._initialize_codebook(seed)
