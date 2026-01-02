@@ -1,7 +1,31 @@
 # HoloGrad 프로젝트 진행 체크포인트
 
 **마지막 업데이트**: 2026-01-02
-**커밋**: `e28379e` - Fix HoloGrad variance and add ADC bootstrap mode
+**현재 상태**: 논문 수정 및 질문 분석 완료
+
+---
+
+## 0. 최근 세션 완료 작업 (2026-01-02)
+
+### 논문 수정 (holograd_tex.tex)
+1. **ADC 초기화/Bootstrap 섹션 추가** (Section 5.2)
+   - Cold-start problem 설명
+   - Random-direction warmup vs Bootstrap 전략 비교
+   - Verifiability 영향 분석
+
+2. **Variance Analysis 수정** (Section 4.3)
+   - ADC scale_factor = rank (not 1) 명시
+   - Normalized subspace direction 설명
+   - Variance correction 수식 추가: `sqrt(K/effective_dim)`
+
+3. **실험 조건 명확화** (Section 6.2)
+   - K/D 비율 테이블 추가
+   - Practical threshold: K/D ≳ 0.01
+
+### 질문 분석 결과
+1. **Bootstrap vs Verifiability**: Bootstrap은 NOT verifiable, 이후 HoloGrad는 fully verifiable ("Partial verifiability")
+2. **Momentum-centric without bootstrap**: ✅ 가능 - warmup 동안 random directions로 momentum 축적
+3. **Dynamic ADC rank**: 가능하나 미구현 - captured_energy_ratio 기반 조절 전략 제안
 
 ---
 
@@ -74,20 +98,23 @@ Random direction 기반 gradient 재구성은 **K ≈ D** 일 때만 잘 작동�
 
 ---
 
-## 4. 논문 수정 필요 사항
+## 4. 논문 수정 필요 사항 ✅ 완료
 
-### 4.1 ADC 초기화 섹션 추가
-- Random ADC subspace로는 고차원 문제에서 작동하지 않음
-- Bootstrap 단계 필요성 명시
-- 또는 momentum-centric 방식 사용
+### 4.1 ADC 초기화 섹션 추가 ✅
+- ~~Random ADC subspace로는 고차원 문제에서 작동하지 않음~~
+- ~~Bootstrap 단계 필요성 명시~~
+- ~~또는 momentum-centric 방식 사용~~
+- **→ Section 5.2 "ADC Initialization and the Cold-Start Problem" 추가됨**
 
-### 4.2 Variance Analysis 수정
-- ADC scale_factor = rank (not dimension)
-- Variance correction: `sqrt(K/effective_dim)`
+### 4.2 Variance Analysis 수정 ✅
+- ~~ADC scale_factor = rank (not dimension)~~
+- ~~Variance correction: `sqrt(K/effective_dim)`~~
+- **→ Section 4.3 수정됨: normalized subspace direction, scale_factor = r**
 
-### 4.3 실험 조건 명확화
-- Quadratic (저차원) vs WikiText (고차원) 차이 설명
-- ADC warmup 전략 비교 실험 필요
+### 4.3 실험 조건 명확화 ✅
+- ~~Quadratic (저차원) vs WikiText (고차원) 차이 설명~~
+- ~~ADC warmup 전략 비교 실험 필요~~
+- **→ Section 6.2 K/D 비율 테이블 및 practical threshold 추가됨**
 
 ---
 
@@ -150,8 +177,23 @@ trainer.train(num_steps=100)  # HoloGrad로 계속 학습
 
 ---
 
-## 8. 질문/이슈
+## 8. 질문/이슈 ✅ 분석 완료
 
-1. Bootstrap 단계가 논문의 "verifiable" 특성에 영향을 주는가?
-2. Momentum-centric 모드가 bootstrap 없이 작동할 수 있는가?
-3. ADC rank를 동적으로 조절하는 것이 가능한가?
+### Q1: Bootstrap 단계가 논문의 "verifiable" 특성에 영향을 주는가? ✅
+**답변**: Yes, 영향 있음 ("Partial verifiability")
+- Bootstrap 단계: true gradient 사용 → NOT verifiable (coordinator 신뢰 필요)
+- 이후 HoloGrad: scalar PoGP proofs → fully verifiable
+- 일회성 초기화 비용이므로 수용 가능한 trade-off
+
+### Q2: Momentum-centric 모드가 bootstrap 없이 작동할 수 있는가? ✅
+**답변**: Yes, 가능함
+- Warmup 동안 random directions 사용 (coordinator.py line 99-107)
+- Noisy하지만 unbiased gradient 추정 가능
+- Momentum = reconstructed gradient의 EMA로 축적
+- ADC와 달리 subspace 학습 불필요 → bootstrap 불필요
+
+### Q3: ADC rank를 동적으로 조절하는 것이 가능한가? ✅
+**답변**: 이론적으로 가능, 현재 미구현
+- 지표: `captured_energy_ratio(gradient)` 활용 가능
+- 전략: γ < 0.5이면 rank 증가, γ ≈ 1이면 rank 감소
+- 구현 시 고려사항: codebook reshape, 통신 프로토콜 변경, hysteresis

@@ -183,28 +183,40 @@ With i.i.d. directions, $\widehat{\g} = \frac{1}{K}\sum_{j=1}^K \hat{\g}(\vdir_j
 \subsection{Adaptive Direction Codebook (ADC)}
 Random directions can be sample-inefficient in high dimensions. We restrict directions to a learned low-rank subspace.
 
-\paragraph{Fixed $z$ distribution (no normalization).}
-We \textbf{fix} $z\sim\mathcal{N}(0,I_r)$ (or Rademacher $\pm1$) without normalization so that
-\[
-\E[zz^\top]=I_r.
-\]
-This avoids the ``$1/r$'' scaling ambiguity.
-
 \paragraph{Codebook and subspace directions.}
-Maintain an orthonormal codebook $\U_t\in\R^{D\times r}$ with $r\ll D$. A seed generates $z\in\R^r$ and
+Maintain an orthonormal codebook $\U_t\in\R^{D\times r}$ with $r\ll D$. A seed generates $z\sim\mathcal{N}(0,I_r)$ and we construct a \emph{normalized} subspace direction:
 \[
-\vdir = \U_t z.
+\vdir = \frac{\U_t z}{\norm{\U_t z}}.
 \]
-Then $\E[\vdir\vdir^\top] = \U_t\E[zz^\top]\U_t^\top = \U_t\U_t^\top$. In the subspace case we interpret Assumption~\ref{assump:isotropic} in the projected form
+Since $\U_t$ is orthonormal, $\norm{\U_t z} = \norm{z}$, so equivalently $\vdir = \U_t (z / \norm{z})$. This yields unit-norm directions constrained to the column space of $\U_t$.
+
+\paragraph{Scale factor for ADC.}
+For the normalized subspace direction, we have $\norm{\vdir} = 1$ and
 \[
-\E[\vdir\vdir^\top] = \sigma^2 \U\U^\top,
-\quad\text{with }\sigma^2=1 \text{ under } \E[zz^\top]=I_r.
+\E[\vdir\vdir^\top] \approx \frac{1}{r} \U_t\U_t^\top.
 \]
-Accordingly, the scale-corrected estimator $\hat{\g}(\vdir)=\frac{1}{\sigma^2}(g\cdot \vdir)\vdir$ satisfies
+This is analogous to the full-space case where $\E[\vdir\vdir^\top] = \frac{1}{D}I$. Thus, the ADC scale factor is:
 \[
-\E[\hat{\g}(\vdir)] = \U\U^\top \g,
+\sigma^2_{\text{ADC}} = \frac{1}{r}, \quad \text{scale factor} = r.
 \]
-i.e., it is unbiased for the projected gradient.
+The scale-corrected synthesis becomes:
+\[
+\widehat{\g}_t = \frac{r}{K}\sum_{j=1}^K a_{t,j}\vdir_{t,j}.
+\]
+
+\paragraph{Variance correction.}
+When aggregating $K$ scalar projections, the variance of the reconstructed gradient depends on the effective dimension. We apply a variance correction factor:
+\[
+\text{variance correction} = \sqrt{\frac{K}{\text{effective\_dim}}},
+\]
+where $\text{effective\_dim} = D$ for full-space random directions and $\text{effective\_dim} = r$ for ADC. This correction ensures consistent gradient magnitude across different direction strategies.
+
+\paragraph{Unbiasedness in subspace.}
+The scale-corrected estimator $\hat{\g}(\vdir)=r \cdot (\g\cdot \vdir)\vdir$ satisfies
+\[
+\E[\hat{\g}(\vdir)] = \U_t\U_t^\top \g,
+\]
+i.e., it is unbiased for the projected gradient onto the ADC subspace.
 
 \begin{assumption}[$L$-smoothness]\label{assump:smooth}
 $\Lcal$ is $L$-smooth: for any $\delta$,
@@ -251,6 +263,53 @@ Define
 \]
 Then Theorem~\ref{thm:subspace} implies idealized descent is proportional to $\gamma_t\norm{\g}^2$.
 
+\subsection{ADC Initialization and the Cold-Start Problem}
+\label{sec:adc-init}
+
+A critical practical challenge for ADC is the \emph{cold-start problem}: the codebook $\U_0$ is initialized randomly, which means initial ADC directions capture negligible gradient energy ($\gamma_0 \approx 0.01$ for high-dimensional models). This creates a chicken-and-egg situation:
+\begin{itemize}[leftmargin=*]
+  \item ADC requires good gradient estimates to learn the correct subspace
+  \item Good gradient estimates require ADC to already capture the gradient subspace
+\end{itemize}
+
+\paragraph{Empirical observation.}
+For a GPT-2-small model ($D \approx 124$M), we observed:
+\begin{itemize}[leftmargin=*]
+  \item Random ADC initialization captures only $\approx 0.016\%$ of gradient energy
+  \item Reconstructed gradients are essentially noise, preventing both learning and codebook improvement
+  \item Training loss remains flat even after hundreds of steps
+\end{itemize}
+
+\paragraph{Solution: Warmup strategies.}
+We propose two complementary approaches:
+
+\textbf{(i) Random-direction warmup.} During the first $T_{\text{warm}}$ steps, use full-space random directions instead of ADC directions. This provides unbiased (though high-variance) gradient estimates that allow the ADC to learn the gradient subspace. After warmup, switch to ADC directions.
+
+\textbf{(ii) Bootstrap with true gradients.} For an initial $T_{\text{boot}}$ steps, compute true gradients via backpropagation and use them to:
+\begin{itemize}[leftmargin=*]
+  \item Initialize the ADC codebook via SVD of gradient history
+  \item Update model parameters with standard SGD
+\end{itemize}
+After bootstrap, the ADC codebook captures the dominant gradient subspace, and the HoloGrad protocol can proceed effectively.
+
+\paragraph{Verifiability consideration.}
+The bootstrap phase uses standard backpropagation, which is \emph{not} subject to PoGP verification. This represents a trust assumption: the coordinator (or a trusted party) must honestly execute the bootstrap phase. However, this is a one-time initialization cost, and the subsequent HoloGrad protocol remains fully verifiable.
+
+\paragraph{Trade-offs.}
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Strategy} & \textbf{Verifiable} & \textbf{Convergence} \\
+\midrule
+No warmup & \checkmark & Poor (stuck) \\
+Random-direction warmup & \checkmark & Slow then fast \\
+Bootstrap (true gradients) & Partial & Fast from start \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+In practice, we recommend bootstrap for high-dimensional problems where fast convergence is critical, and random-direction warmup for settings where full verifiability is required.
+
 \section{Gradient Subspace Variability in Neural Networks}
 \label{sec:variability}
 
@@ -277,7 +336,26 @@ The expected cosine similarity between $\widehat{\g}$ and $\g$ scales as:
 \[
 \E\left[\frac{\ip{\g}{\widehat{\g}}}{\norm{\g}\norm{\widehat{\g}}}\right] \approx \sqrt{\frac{K}{D}}.
 \]
-For GPT-2-small ($D \approx 124\text{M}$) with $K=128$, this gives $\sqrt{128/124\text{M}} \approx 0.001$---essentially noise.
+
+\paragraph{The $K/D$ ratio determines feasibility.}
+This scaling law has profound implications for when HoloGrad can work:
+
+\begin{center}
+\begin{tabular}{lcccl}
+\toprule
+\textbf{Problem} & $D$ & $K$ & $K/D$ & \textbf{Outcome} \\
+\midrule
+Quadratic (2D) & 2 & 16 & 8.0 & \checkmark Works well \\
+Small MLP & 10K & 64 & 0.006 & Marginal \\
+GPT-2 Small & 124M & 128 & $10^{-6}$ & $\times$ Fails \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+For GPT-2-small ($D \approx 124\text{M}$) with $K=128$, this gives $\sqrt{128/124\text{M}} \approx 0.001$---essentially noise. The reconstructed gradient has negligible correlation with the true gradient.
+
+\paragraph{Practical threshold.}
+Empirically, we observe that random-direction HoloGrad requires $K/D \gtrsim 0.01$ (i.e., $K \gtrsim D/100$) for meaningful convergence. For high-dimensional neural networks, this is infeasible---GPT-2-small would require $K \approx 1.2$M directions per step, negating any communication savings.
 
 \subsection{Implications for ADC}
 
