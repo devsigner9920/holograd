@@ -62,12 +62,13 @@ class ADCCodebook:
         rank: int = 32,
         oja_alpha: float = 1e-3,
         qr_period: int = 100,
-        dtype: np.dtype = np.float32,
+        dtype: np.dtype = np.float16,
         warmup_samples: int = 0,
         alpha_decay: float = 1.0,
         alpha_min: float = 1e-4,
         use_power_iteration: bool = False,
         power_iteration_steps: int = 3,
+        device: str = "cpu",
     ):
         self.dimension = dimension
         self.rank = rank
@@ -75,6 +76,7 @@ class ADCCodebook:
         self.oja_alpha_initial = oja_alpha
         self.qr_period = qr_period
         self.dtype = dtype
+        self.device = device
 
         self.warmup_samples = warmup_samples
         self._warmup_buffer: list[NDArray[np.float32]] = []
@@ -87,7 +89,7 @@ class ADCCodebook:
         self.use_power_iteration = use_power_iteration
         self.power_iteration_steps = power_iteration_steps
 
-        self._U: NDArray[np.float32] = self._initialize_codebook()
+        self._U: NDArray = self._initialize_codebook()
         self._step = 0
 
         self._energy_history: list[float] = []
