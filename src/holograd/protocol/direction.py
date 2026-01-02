@@ -116,11 +116,32 @@ class ADCCodebook:
     def energy_ema(self) -> float:
         return self._energy_ema
 
-    def _initialize_codebook(self, seed: Optional[int] = None) -> NDArray[np.float32]:
+    def _initialize_codebook(self, seed: Optional[int] = None) -> NDArray:
         rng = np.random.default_rng(seed)
-        random_matrix = rng.standard_normal((self.dimension, self.rank)).astype(self.dtype)
-        Q, _ = np.linalg.qr(random_matrix)
-        return Q.astype(self.dtype)
+        U = np.zeros((self.dimension, self.rank), dtype=self.dtype)
+
+        chunk_size = 1_000_000
+        for col in range(self.rank):
+            column = np.empty(self.dimension, dtype=self.dtype)
+            remaining = self.dimension
+            offset = 0
+            while remaining > 0:
+                size = min(chunk_size, remaining)
+                chunk = rng.standard_normal(size).astype(self.dtype)
+                column[offset : offset + size] = chunk
+                offset += size
+                remaining -= size
+
+            for prev_col in range(col):
+                dot_product = np.dot(U[:, prev_col].astype(np.float32), column.astype(np.float32))
+                column = column - dot_product * U[:, prev_col]
+
+            norm = np.sqrt(np.sum(column.astype(np.float32) ** 2))
+            if norm > 1e-10:
+                column = column / norm
+            U[:, col] = column
+
+        return U
 
     def _initialize_from_gradients(
         self, gradients: list[NDArray[np.float32]]
