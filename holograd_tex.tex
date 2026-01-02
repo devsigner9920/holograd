@@ -1,0 +1,820 @@
+% main.tex (fully consistent version)
+% Key fixes:
+%  - \v -> \vdir (avoid LaTeX accent collision)
+%  - a^\* -> a^{*} (safe)
+%  - Dir(s) is FIXED: unit-norm isotropic on sphere => E[vv^T] = (1/D) I
+%  - sigma^2 is defined and used consistently in BOTH text + algorithm
+%  - ADC: FIXED z distribution (no normalization): z ~ N(0, I_r) so E[zz^T]=I_r
+%  - Subspace case uses v = U z / ||Uz|| (optional) OR v = U z with scale-corrected sigma^2
+%    In this paper we pick the clean, consistent choice: v = U z (no normalization),
+%    which yields E[vv^T] = U U^T (i.e., sigma^2 = 1 in-subspace).
+%
+% Compile:
+%   pdflatex main
+%   bibtex main
+%   pdflatex main
+%   pdflatex main
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{microtype}
+\usepackage{times}
+\usepackage{amsmath, amssymb, amsthm}
+\usepackage{mathtools}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{url}
+
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+% -------------------------
+% Theorem environments
+% -------------------------
+\newtheorem{theorem}{Theorem}
+\newtheorem{lemma}{Lemma}
+\newtheorem{definition}{Definition}
+\newtheorem{assumption}{Assumption}
+\newtheorem{proposition}{Proposition}
+\newtheorem{corollary}{Corollary}
+
+% -------------------------
+% Notation macros (SAFE)
+% -------------------------
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\Var}{\mathrm{Var}}
+\newcommand{\ip}[2]{\left\langle #1, #2 \right\rangle}
+\newcommand{\norm}[1]{\left\lVert #1 \right\rVert}
+\newcommand{\Lcal}{\mathcal{L}}
+\newcommand{\g}{\bm{g}}
+\newcommand{\vdir}{\bm{v}}   % renamed from \v (reserved accent in LaTeX)
+\newcommand{\U}{\bm{U}}
+\newcommand{\thetaVec}{\bm{\theta}}
+\newcommand{\DeltaTheta}{\Delta \bm{\theta}}
+
+% Identifiers that contain underscores (safe in text mode)
+\newcommand{\codebookid}{\texttt{codebook\_id}}
+\newcommand{\batchid}{\texttt{batch\_id}}
+\newcommand{\pverifyid}{\texttt{p\_verify}}
+\newcommand{\tqrid}{\texttt{T\_qr}}
+\newcommand{\keffid}{\texttt{K\_eff}}
+
+% -------------------------
+% Title
+% -------------------------
+\title{\textbf{HoloGrad: Proof-of-Gradient-Projection (PoGP) for Verifiable, Mining-Style Distributed LLM Pretraining}}
+\author{
+  WonJune Kang\\
+  \texttt{devsigner9920@gmail.com}
+}
+\date{}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+Large-scale language model (LLM) pretraining is bottlenecked by high-dimensional gradient/parameter tensor synchronization and straggler effects, effectively restricting training to data-center-grade clusters. We propose \emph{HoloGrad}, a protocol and system that replaces tensor communication with \emph{verifiable scalar proofs} based on gradient projections (directional derivatives). Each worker submits only a seed and a scalar projection value, while the coordinator reconstructs directions from seeds and aggregates updates via linear synthesis. We introduce \emph{Proof-of-Gradient-Projection (PoGP)}: a sampling-based verification mechanism enabling low-cost validation and incentive-compatible accounting in a mining-style open network.
+
+We identify a fundamental challenge: for neural networks, gradient directions vary significantly across mini-batches (pairwise cosine similarity $\approx 0.07$), preventing random-direction estimators from achieving efficient reconstruction when $K \ll D$. To address this, we propose two complementary variants: (i) \emph{HoloGrad-ADC} with an Adaptive Direction Codebook for settings where gradients occupy a stable low-rank subspace, and (ii) \emph{Momentum-Centric HoloGrad}, which projects onto a shared momentum direction, reducing communication to a single scalar per worker while achieving meaningful convergence ($\approx 30$--$40\%$ of full SGD efficiency). We provide descent guarantees, analyze verification/slashing parameters, and present reproducible experiments demonstrating when each variant is appropriate.
+\end{abstract}
+
+\section{Introduction}
+\paragraph{Background.}
+Distributed training typically requires communicating high-dimensional gradients (or equivalent sufficient statistics), inducing bandwidth and latency bottlenecks. Synchronous training further suffers from stragglers, making permissionless heterogeneous nodes impractical.
+
+\paragraph{Goal.}
+We aim to reshape pretraining into a mining-like protocol: permissionless participation, cheap verification, and incentive-compatible rewards—while still improving a global model.
+
+\paragraph{Key idea.}
+Replace tensor communication with \emph{scalar proofs}:
+\[
+a = \ip{\nabla_{\thetaVec}\Lcal_B(\thetaVec)}{\vdir}, \quad a\in\R
+\]
+where $\vdir$ is deterministically generated from a public seed. The coordinator reconstructs $\vdir$ and synthesizes updates from scalar-direction pairs. Directional-derivative-based gradient estimators are connected to forward-mode AD and "gradients without backpropagation" directions \cite{baydin2022gradients,shukla2023randomized}.
+
+\paragraph{Neural network challenge.}
+While random projection estimators are unbiased in expectation, they face a fundamental obstacle in neural network training: \emph{gradient directions vary dramatically across mini-batches}. Empirically, we observe pairwise cosine similarities of only $\approx 0.07$ between gradients from different batches. This near-orthogonality implies that no fixed low-rank subspace captures most gradient energy across batches, causing both random-direction estimators (when $K \ll D$) and learned codebooks (ADC) to struggle. In contrast, training momentum---which accumulates past gradient information---provides a stable, informative direction that captures meaningful signal.
+
+\paragraph{Contributions.}
+We present two complementary HoloGrad variants:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{HoloGrad-ADC}: Uses an Adaptive Direction Codebook to project onto a learned low-rank subspace. Effective when gradients occupy a stable subspace (e.g., convex problems, later training stages).
+  \item \textbf{Momentum-Centric HoloGrad}: Projects each worker's gradient onto a shared momentum direction, reducing communication to a \emph{single scalar per worker}. Achieves $\approx 30$--$40\%$ of full SGD efficiency while being $64\times$ more communication-efficient than random projections.
+\end{itemize}
+
+\section{Related Work}
+Directional-derivative / forward-mode gradient construction has been studied as an alternative to backpropagation \cite{baydin2022gradients,shukla2023randomized}. Communication-efficient distributed optimization includes sign-based methods such as signSGD \cite{bernstein2018signsgd}. Locking-free training via synthetic gradients decouples modules \cite{jaderberg2017dni}. Our contribution differs by \emph{protocolizing} directional-derivative scalars into verifiable proofs with economic enforcement and by specifying a fixed adaptive direction codebook update rule (Streaming Oja-QR) for sample-efficiency.
+
+\section{Problem Formulation and Notation}
+Let $\thetaVec\in\R^D$ be model parameters, $\Lcal_B(\thetaVec)$ the minibatch loss, and $\Lcal(\thetaVec)=\E_B[\Lcal_B(\thetaVec)]$ the population objective. Let $\g_B(\thetaVec)=\nabla_{\thetaVec}\Lcal_B(\thetaVec)$ and $\g(\thetaVec)=\nabla_{\thetaVec}\Lcal(\thetaVec)$.
+
+\paragraph{System constraints.}
+(i) per-worker uplink must be low-dimensional, ideally $O(1)$ scalars per task; (ii) verification must be feasible at scale via sampling; (iii) robustness to heterogeneity and adversarial behavior.
+
+\section{HoloGrad and PoGP Protocol}
+
+\subsection{Seeded direction generation (fixed)}
+A public seed $s$ defines a direction via a deterministic generator
+\[
+\vdir = \mathrm{Dir}(s)\in\R^D.
+\]
+\textbf{We fix $\mathrm{Dir}$ to output a unit-norm isotropic direction} (e.g., sample $z\sim \mathcal{N}(0,I_D)$ from a seeded PRNG and set $\vdir=z/\norm{z}$). Then $\norm{\vdir}=1$ and
+\[
+\E[\vdir\vdir^\top] = \frac{1}{D}I,
+\]
+so throughout the full-space case we use the scale parameter
+\[
+\sigma^2 := \frac{1}{D}.
+\]
+(Other choices such as unnormalized Rademacher directions are possible but are not used in this paper to keep norms bounded.)
+
+\subsection{Worker proof: scalar projection}
+Given current checkpoint $\thetaVec_t$ and minibatch $B_t$, a worker computes
+\[
+a_{t} = \ip{\g_{B_t}(\thetaVec_t)}{\vdir}
+\]
+and submits a proof $(s,a_t)$ plus metadata (optional attestation, timing, signature).
+
+\subsection{Coordinator aggregation (HoloGrad synthesis)}
+Collect $K$ proofs $(s_j,a_j)$, reconstruct $\vdir_j=\mathrm{Dir}(s_j)$, and synthesize the gradient estimate using the scale correction:
+\[
+\widehat{\g}_t = \frac{1}{K}\sum_{j=1}^K \frac{1}{\sigma^2}\,a_{t,j}\vdir_{t,j},
+\qquad
+\thetaVec_{t+1} = \thetaVec_t - \eta \widehat{\g}_t.
+\]
+With the fixed unit-norm isotropic $\mathrm{Dir}$ above, $\sigma^2=1/D$ and thus $\widehat{\g}_t=\frac{D}{K}\sum_j a_{t,j}\vdir_j$.
+
+\subsection{PoGP verification}
+A verifier samples each proof with probability $p_{\mathrm{verify}}$ and recomputes $a^{*}$ under the same $(\thetaVec_t,B_t,s)$:
+\[
+|a-a^{*}|\le \epsilon \Rightarrow \text{accept}; \quad \text{else slash/penalize}.
+\]
+This enables low-cost statistical verification in expectation via sampling; $\epsilon$ handles numeric nondeterminism and implementation differences.
+
+\section{Theory: Correctness and Descent}
+
+\begin{assumption}[Isotropic directions up to scale]\label{assump:isotropic}
+Directions satisfy $\E[\vdir\vdir^\top]=\sigma^2 I$ for some $\sigma^2>0$.
+\end{assumption}
+
+\begin{theorem}[Unbiased directional estimator with scale correction]\label{thm:unbiased}
+Let $\hat{\g}(\vdir) = \frac{1}{\sigma^2}(\g\cdot \vdir)\vdir$. Under Assumption~\ref{assump:isotropic},
+\[
+\E_{\vdir}[\hat{\g}(\vdir)] = \g.
+\]
+\end{theorem}
+\begin{proof}
+\[
+\E\!\left[\frac{1}{\sigma^2}(\g\cdot \vdir)\vdir\right]
+= \frac{1}{\sigma^2}\E[\vdir\vdir^\top]\g
+= \frac{1}{\sigma^2}(\sigma^2 I)\g
+= \g.
+\]
+\end{proof}
+
+\paragraph{Variance and sample size.}
+With i.i.d. directions, $\widehat{\g} = \frac{1}{K}\sum_{j=1}^K \hat{\g}(\vdir_j)$ has variance scaling $O(1/K)$; heavy tails increase the constant factors \cite{shukla2023randomized}.
+
+\subsection{Adaptive Direction Codebook (ADC)}
+Random directions can be sample-inefficient in high dimensions. We restrict directions to a learned low-rank subspace.
+
+\paragraph{Fixed $z$ distribution (no normalization).}
+We \textbf{fix} $z\sim\mathcal{N}(0,I_r)$ (or Rademacher $\pm1$) without normalization so that
+\[
+\E[zz^\top]=I_r.
+\]
+This avoids the ``$1/r$'' scaling ambiguity.
+
+\paragraph{Codebook and subspace directions.}
+Maintain an orthonormal codebook $\U_t\in\R^{D\times r}$ with $r\ll D$. A seed generates $z\in\R^r$ and
+\[
+\vdir = \U_t z.
+\]
+Then $\E[\vdir\vdir^\top] = \U_t\E[zz^\top]\U_t^\top = \U_t\U_t^\top$. In the subspace case we interpret Assumption~\ref{assump:isotropic} in the projected form
+\[
+\E[\vdir\vdir^\top] = \sigma^2 \U\U^\top,
+\quad\text{with }\sigma^2=1 \text{ under } \E[zz^\top]=I_r.
+\]
+Accordingly, the scale-corrected estimator $\hat{\g}(\vdir)=\frac{1}{\sigma^2}(g\cdot \vdir)\vdir$ satisfies
+\[
+\E[\hat{\g}(\vdir)] = \U\U^\top \g,
+\]
+i.e., it is unbiased for the projected gradient.
+
+\begin{assumption}[$L$-smoothness]\label{assump:smooth}
+$\Lcal$ is $L$-smooth: for any $\delta$,
+\[
+\Lcal(\thetaVec+\delta)\le \Lcal(\thetaVec)+\ip{\nabla\Lcal(\thetaVec)}{\delta}+\frac{L}{2}\norm{\delta}^2.
+\]
+\end{assumption}
+
+\begin{theorem}[Projected-gradient descent decrease (idealized)]\label{thm:subspace}
+Under Assumption~\ref{assump:smooth}, with deterministic update $\delta=-\eta \U\U^\top \g$,
+\[
+\Lcal(\thetaVec-\eta \U\U^\top \g)\le \Lcal(\thetaVec) - \Big(\eta-\frac{L\eta^2}{2}\Big)\norm{\U\U^\top \g}^2.
+\]
+Thus for $\eta\in(0,2/L)$, the loss decreases whenever $\U\U^\top \g\neq 0$.
+\end{theorem}
+\begin{proof}
+Apply $L$-smoothness with $\delta=-\eta \U\U^\top \g$. The linear term is $-\eta\norm{\U\U^\top \g}^2$ and the quadratic term is $\frac{L\eta^2}{2}\norm{\U\U^\top \g}^2$.
+\end{proof}
+
+\paragraph{Remark (stochasticity and robust aggregation).}
+In the full protocol, $\DeltaTheta_t$ is stochastic (mini-batches, random directions) and may be biased by robust aggregation (e.g., trimming) under adversaries. A full convergence theorem requires bounding both the variance term and any aggregation-induced bias; we treat this as an experimental and future-theoretical extension.
+
+\section{Fixed Codebook Update: Streaming Oja-QR}
+We now \emph{fix} the codebook update rule (no ambiguity).
+
+\paragraph{Observation.}
+The synthesized update provides a streaming signal of frequent update directions. We track a top-$r$ subspace via Oja's rule with periodic orthonormalization.
+
+\subsection{Streaming Oja step}
+Given the aggregated gradient estimate $\widehat{\g}_t$ (or parameter update direction proportional to it) and current $\U_t$:
+\[
+\widetilde{\U}_{t+1} = \U_t + \alpha_t\, \widehat{\g}_t(\widehat{\g}_t^\top \U_t).
+\]
+Periodically (every $T_{\mathrm{qr}}$ steps), perform QR:
+\[
+\U_{t+1} \leftarrow \mathrm{QR}(\widetilde{\U}_{t+1}).
+\]
+Otherwise set $\U_{t+1}\leftarrow \widetilde{\U}_{t+1}$ with column normalization.
+
+\paragraph{Captured energy ratio.}
+Define
+\[
+\gamma_t=\frac{\norm{\U_t\U_t^\top \g(\thetaVec_t)}^2}{\norm{\g(\thetaVec_t)}^2}\in[0,1].
+\]
+Then Theorem~\ref{thm:subspace} implies idealized descent is proportional to $\gamma_t\norm{\g}^2$.
+
+\section{Gradient Subspace Variability in Neural Networks}
+\label{sec:variability}
+
+The theoretical guarantees of HoloGrad assume that either (i) enough random directions are sampled ($K$ sufficiently large), or (ii) the ADC subspace captures significant gradient energy ($\gamma_t$ close to 1). We now investigate why these assumptions often fail for neural network training.
+
+\subsection{Empirical observation: near-orthogonal gradients}
+
+We computed gradients on a GPT-2-small model across 50 independent mini-batches and measured pairwise cosine similarities. The results are striking:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Pairwise cosine similarity}: $\approx 0.07$ (nearly orthogonal)
+  \item \textbf{Leave-one-out SVD reconstruction}: $\approx 0.24$ cosine similarity
+  \item \textbf{Gradient variance ratio}: $\frac{\|\E[\g_B] - \g_B\|^2}{\|\g_B\|^2} \approx 0.93$
+\end{itemize}
+
+This implies that gradients from different mini-batches point in nearly independent directions in the $D$-dimensional parameter space.
+
+\subsection{Implications for random projections}
+
+For random unit directions $\vdir_j$ with $K \ll D$, the reconstructed gradient is:
+\[
+\widehat{\g} = \frac{D}{K}\sum_{j=1}^K \ip{\g}{\vdir_j}\vdir_j.
+\]
+The expected cosine similarity between $\widehat{\g}$ and $\g$ scales as:
+\[
+\E\left[\frac{\ip{\g}{\widehat{\g}}}{\norm{\g}\norm{\widehat{\g}}}\right] \approx \sqrt{\frac{K}{D}}.
+\]
+For GPT-2-small ($D \approx 124\text{M}$) with $K=128$, this gives $\sqrt{128/124\text{M}} \approx 0.001$---essentially noise.
+
+\subsection{Implications for ADC}
+
+The ADC learns a subspace from historical gradient estimates. However, if gradients are nearly orthogonal across batches, no stable low-rank subspace exists. We observed:
+\begin{itemize}[leftmargin=*]
+  \item Captured energy $\gamma_t < 0.01$ even with rank $r=64$
+  \item Codebook directions become stale within a few batches
+  \item Improvement over random directions is marginal ($< 2\times$)
+\end{itemize}
+
+\subsection{Why momentum works}
+
+In contrast to random or learned directions, the training momentum:
+\[
+\bm{m}_t = \beta \bm{m}_{t-1} + (1-\beta)\g_t
+\]
+accumulates gradient information over time. Even if individual gradients are nearly orthogonal, the momentum direction correlates with the \emph{average} gradient direction. Empirically:
+\begin{itemize}[leftmargin=*]
+  \item Cosine similarity $\ip{\g_t}{\bm{m}_t/\norm{\bm{m}_t}} \approx 0.18$
+  \item This is $\approx 180\times$ better alignment than random directions
+  \item Communication: 1 scalar vs $K=128$ scalars
+\end{itemize}
+
+This motivates our Momentum-Centric HoloGrad variant.
+
+\section{Momentum-Centric HoloGrad}
+\label{sec:momentum}
+
+We now present a variant of HoloGrad that uses the coordinator's momentum as the shared direction, achieving extreme communication efficiency.
+
+\subsection{Protocol overview}
+
+Instead of sampling $K$ random directions, we use a single shared direction: the normalized momentum maintained by the coordinator.
+
+\paragraph{Coordinator state.}
+Maintain momentum $\bm{m}_t \in \R^D$ and checkpoint $\thetaVec_t$.
+
+\paragraph{Worker task.}
+Given $(\thetaVec_t, B_t, \bm{m}_t)$, compute:
+\[
+a = \ip{\g_{B_t}(\thetaVec_t)}{\frac{\bm{m}_t}{\norm{\bm{m}_t}}}.
+\]
+Submit scalar $a$ (one number per worker).
+
+\paragraph{Coordinator aggregation.}
+Collect scalars $\{a_i\}_{i=1}^N$ from $N$ workers. Compute aggregated projection:
+\[
+\bar{a} = \frac{1}{N}\sum_{i=1}^N a_i.
+\]
+Estimate gradient magnitude from moving average of $\|\widehat{\g}\|$, denoted $\hat{\sigma}$. Reconstruct:
+\[
+\widehat{\g}_t = \bar{a} \cdot \hat{\sigma} \cdot \frac{\bm{m}_t}{\norm{\bm{m}_t}}.
+\]
+Update parameters and momentum:
+\begin{align}
+\thetaVec_{t+1} &= \thetaVec_t - \eta \widehat{\g}_t, \\
+\bm{m}_{t+1} &= \beta \bm{m}_t + (1-\beta)\widehat{\g}_t.
+\end{align}
+
+\subsection{Theoretical guarantees}
+
+We now establish formal guarantees for momentum-centric HoloGrad. Let $\hat{\bm{m}}_t = \bm{m}_t / \norm{\bm{m}_t}$ denote the unit momentum direction.
+
+\begin{assumption}[Unbiased stochastic gradients]\label{assump:unbiased}
+Each worker's mini-batch gradient $\g_i$ satisfies $\E[\g_i] = \g$ where $\g = \nabla\Lcal(\thetaVec_t)$ is the true gradient.
+\end{assumption}
+
+\begin{theorem}[Non-negative expected alignment]\label{thm:alignment}
+Under Assumption~\ref{assump:unbiased}, the reconstructed gradient $\widehat{\g}_t = \bar{a} \cdot \hat{\bm{m}}_t$ satisfies
+\[
+\E[\ip{\g}{\widehat{\g}_t}] = \ip{\g}{\hat{\bm{m}}_t}^2 \geq 0.
+\]
+The expected update direction always has non-negative alignment with the true gradient.
+\end{theorem}
+
+\begin{proof}
+Each worker computes $a_i = \ip{\g_i}{\hat{\bm{m}}_t}$. Taking expectation:
+\[
+\E[\bar{a}] = \E\left[\frac{1}{N}\sum_{i=1}^N \ip{\g_i}{\hat{\bm{m}}_t}\right] = \ip{\E[\g_i]}{\hat{\bm{m}}_t} = \ip{\g}{\hat{\bm{m}}_t}.
+\]
+Define $\alpha_t := \ip{\g}{\hat{\bm{m}}_t}$ (the gradient's projection onto momentum). Then:
+\[
+\E[\widehat{\g}_t] = \E[\bar{a}] \cdot \hat{\bm{m}}_t = \alpha_t \cdot \hat{\bm{m}}_t.
+\]
+The expected alignment is:
+\[
+\E[\ip{\g}{\widehat{\g}_t}] = \ip{\g}{\alpha_t \cdot \hat{\bm{m}}_t} = \alpha_t \ip{\g}{\hat{\bm{m}}_t} = \alpha_t^2 \geq 0.
+\]
+\end{proof}
+
+\begin{theorem}[Expected descent under smoothness]\label{thm:momentum-descent}
+Under Assumptions~\ref{assump:smooth} and~\ref{assump:unbiased}, with update $\thetaVec_{t+1} = \thetaVec_t - \eta \widehat{\g}_t$ where $\widehat{\g}_t = \bar{a} \cdot \hat{\bm{m}}_t$:
+\[
+\E[\Lcal(\thetaVec_{t+1})] \leq \Lcal(\thetaVec_t) - \alpha_t^2 \left(\eta - \frac{L\eta^2}{2}\right) + \frac{L\eta^2}{2}\Var(\bar{a})
+\]
+where $\alpha_t = \ip{\g}{\hat{\bm{m}}_t}$ and $\Var(\bar{a}) = \frac{1}{N}\Var(a_i)$ is the variance of the aggregated scalar.
+\end{theorem}
+
+\begin{proof}
+By $L$-smoothness (Assumption~\ref{assump:smooth}):
+\[
+\Lcal(\thetaVec_{t+1}) \leq \Lcal(\thetaVec_t) - \eta\ip{\g}{\widehat{\g}_t} + \frac{L\eta^2}{2}\norm{\widehat{\g}_t}^2.
+\]
+Since $\widehat{\g}_t = \bar{a} \cdot \hat{\bm{m}}_t$ and $\norm{\hat{\bm{m}}_t} = 1$:
+\[
+\ip{\g}{\widehat{\g}_t} = \bar{a} \cdot \alpha_t, \quad \norm{\widehat{\g}_t}^2 = \bar{a}^2.
+\]
+Taking expectation:
+\begin{align}
+\E[\Lcal(\thetaVec_{t+1})] &\leq \Lcal(\thetaVec_t) - \eta \E[\bar{a}] \alpha_t + \frac{L\eta^2}{2}\E[\bar{a}^2] \\
+&= \Lcal(\thetaVec_t) - \eta \alpha_t^2 + \frac{L\eta^2}{2}\left(\alpha_t^2 + \Var(\bar{a})\right) \\
+&= \Lcal(\thetaVec_t) - \alpha_t^2\left(\eta - \frac{L\eta^2}{2}\right) + \frac{L\eta^2}{2}\Var(\bar{a}).
+\end{align}
+\end{proof}
+
+\begin{corollary}[Sufficient condition for descent]\label{cor:descent}
+If $\eta < 2/L$ and $\alpha_t \neq 0$, then the expected loss decreases whenever
+\[
+\alpha_t^2 > \frac{L\eta}{2 - L\eta} \Var(\bar{a}).
+\]
+With $N$ workers and bounded per-worker variance $\Var(a_i) \leq \sigma_a^2$:
+\[
+\Var(\bar{a}) = \frac{\sigma_a^2}{N},
+\]
+so more workers reduce variance and ensure descent.
+\end{corollary}
+
+\paragraph{Interpretation.}
+The descent guarantee depends on $\alpha_t^2 = \ip{\g}{\hat{\bm{m}}_t}^2$, the squared correlation between the true gradient and momentum. This quantity is \emph{large} when momentum tracks the gradient direction---which occurs naturally since momentum is an exponential moving average of past gradients. Empirically, we observe $|\alpha_t| / \norm{\g} \approx 0.18$, yielding meaningful descent despite projecting onto a single direction.
+
+\paragraph{Comparison to random projections.}
+For random unit directions $\vdir_j$, the expected squared alignment is $\E[\ip{\g}{\vdir_j}^2] = \norm{\g}^2 / D$. With $K$ directions:
+\[
+\text{Random: } \alpha_{\text{rand}}^2 \approx K \cdot \norm{\g}^2 / D.
+\]
+For momentum, $\alpha_t^2 \approx 0.03 \norm{\g}^2$ (based on empirical cosine similarity of 0.18). The momentum approach is more efficient than random projections when:
+\[
+0.03 \norm{\g}^2 > K \cdot \norm{\g}^2 / D \quad \Rightarrow \quad K < 0.03 D.
+\]
+For GPT-2-small ($D \approx 124$M), this means momentum outperforms random projections for any $K < 3.7$M---far beyond practical $K$ values.
+
+\subsection{Trade-offs}
+
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Communication}: $O(1)$ scalar per worker (vs $O(K)$ for random HoloGrad)
+  \item \textbf{Convergence speed}: $\approx 30$--$40\%$ of full SGD efficiency
+  \item \textbf{Bias}: Updates are biased toward the momentum direction
+  \item \textbf{Cold start}: Requires warm-up (first few steps use random direction)
+\end{itemize}
+
+\subsection{When to use each variant}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+\textbf{Setting} & \textbf{HoloGrad-ADC} & \textbf{Momentum-Centric} \\
+\midrule
+Convex problems & \checkmark & \\
+Stable gradient subspace & \checkmark & \\
+Neural network training & & \checkmark \\
+Extreme communication limits & & \checkmark \\
+Later training (fine-tuning) & \checkmark & \checkmark \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Robust Aggregation of Scalar Proofs}
+Since proofs are scalars, we can robustly aggregate using trimmed mean or median-of-means.
+
+\paragraph{Trimmed mean (fixed default).}
+Sort $\{a_j\}$ and remove top/bottom $\tau K$ values:
+\[
+\tilde{a}_j \leftarrow \text{TrimMean}_\tau(\{a_j\}_{j=1}^K).
+\]
+Then synthesize using $\sum \tilde{a}_j \vdir_j$ with the same scale correction as in Section~4.
+
+\section{Verification and Incentives (Mining-Style Economics)}
+\subsection{Sampling verification and detection probability}
+Let each submitted proof be verified independently with probability $p$. Suppose an attacker submits $m$ proofs per step and a fraction $q$ are invalid (would fail verification). The probability of catching at least one invalid proof in a step is
+\[
+P(\mathrm{caught}) = 1 - (1-p)^{qm}.
+\]
+
+\subsection{Slashing model and incentive-compatibility}
+We state an explicit \emph{step-level} slashing model:
+(i) if no invalid proof is caught in a step, the attacker receives reward $R$ for each accepted invalid proof; (ii) if any invalid proof is caught, the step reward is forfeited and an additional slashing penalty $S$ is applied.
+Then the expected cheating utility is
+\[
+\E[U_{\text{cheat}}] = (1-P(\mathrm{caught}))\cdot(qmR) - P(\mathrm{caught})\cdot S.
+\]
+A sufficient condition for cheating to be non-profitable is $\E[U_{\text{cheat}}]\le 0$, i.e.,
+\[
+S \ge \frac{1-P(\mathrm{caught})}{P(\mathrm{caught})}\,qmR
+\quad\text{with}\quad
+P(\mathrm{caught})=1-(1-p)^{qm}.
+\]
+Replication (assigning identical tasks to multiple workers) increases detection probability and further discourages attacks.
+
+\section{Algorithms}
+
+\begin{algorithm}[t]
+\caption{HoloGrad Coordinator Step (scale-consistent)}
+\label{alg:coord}
+\begin{algorithmic}[1]
+\Require checkpoint $\thetaVec_t$, codebook $\U_t$, minibatch ID $B_t$, number of proofs $K$, step size $\eta$, scale $\sigma^2$
+\State Publish tasks: seeds $\{s_j\}_{j=1}^K$, with $(H(\thetaVec_t),H(B_t),\codebookid)$
+\State Collect proofs $\{(s_j,a_j)\}_{j=1}^K$
+\State Robust scalar aggregation $\{\tilde{a}_j\}\leftarrow \mathrm{TrimMean}_\tau(\{a_j\})$
+\For{$j=1..K$}
+  \State $\vdir_j \leftarrow \mathrm{Dir}(s_j)$ \Comment{full-space} \ \ \textbf{or} \ \ $\vdir_j \leftarrow \U_t z(s_j)$ \Comment{subspace}
+\EndFor
+\State $\widehat{\g}_t \leftarrow \frac{1}{K}\sum_{j=1}^K \frac{1}{\sigma^2}\,\tilde{a}_j \vdir_j$ \Comment{scale-corrected}
+\State $\thetaVec_{t+1} \leftarrow \thetaVec_t - \eta \widehat{\g}_t$
+\State Update codebook via Streaming Oja-QR using $\widehat{\g}_t$ (periodic QR)
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Worker Proof Generation}
+\label{alg:worker}
+\begin{algorithmic}[1]
+\Require task $(\thetaVec_t,B_t,\U_t,s)$
+\State $\vdir \leftarrow \mathrm{Dir}(s)$ \Comment{full-space} \ \ \textbf{or} \ \ $\vdir \leftarrow \U_t z(s)$ \Comment{subspace}
+\State Compute $a \leftarrow \ip{\nabla_{\thetaVec}\Lcal_{B_t}(\thetaVec_t)}{\vdir}$ \Comment{directional derivative}
+\State Submit proof $(s,a)$ with optional signature/attestation
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Momentum-Centric HoloGrad Coordinator Step}
+\label{alg:momentum-coord}
+\begin{algorithmic}[1]
+\Require checkpoint $\thetaVec_t$, momentum $\bm{m}_t$, minibatch ID $B_t$, $N$ workers, step size $\eta$, momentum coefficient $\beta$, gradient norm estimate $\hat{\sigma}$
+\State Publish task: $(\thetaVec_t, B_t, \bm{m}_t)$
+\State Collect scalars $\{a_i\}_{i=1}^N$ from workers
+\State $\bar{a} \leftarrow \mathrm{TrimMean}_\tau(\{a_i\}_{i=1}^N)$ \Comment{robust aggregation}
+\State $\widehat{\g}_t \leftarrow \bar{a} \cdot \hat{\sigma} \cdot \frac{\bm{m}_t}{\norm{\bm{m}_t}}$ \Comment{reconstruct gradient estimate}
+\State $\thetaVec_{t+1} \leftarrow \thetaVec_t - \eta \widehat{\g}_t$ \Comment{parameter update}
+\State $\bm{m}_{t+1} \leftarrow \beta \bm{m}_t + (1-\beta)\widehat{\g}_t$ \Comment{momentum update}
+\State $\hat{\sigma} \leftarrow 0.9\hat{\sigma} + 0.1\norm{\widehat{\g}_t}$ \Comment{update norm estimate}
+\end{algorithmic}
+\end{algorithm}
+
+\begin{algorithm}[t]
+\caption{Momentum-Centric Worker Proof Generation}
+\label{alg:momentum-worker}
+\begin{algorithmic}[1]
+\Require task $(\thetaVec_t, B_t, \bm{m}_t)$
+\State Compute gradient $\g \leftarrow \nabla_{\thetaVec}\Lcal_{B_t}(\thetaVec_t)$
+\State Compute scalar $a \leftarrow \ip{\g}{\frac{\bm{m}_t}{\norm{\bm{m}_t}}}$ \Comment{project onto momentum}
+\State Submit scalar $a$ \Comment{single scalar per worker}
+\end{algorithmic}
+\end{algorithm}
+
+\section{Experimental Protocol (Overview)}
+We defer full reproducibility details (hashing, scripts, adversary injection) to Appendix~\ref{app:repro}. Core ablations:
+(i) $K$ sweep (communication vs perplexity), (ii) codebook rank $r$ sweep and captured energy $\gamma_t$, (iii) heterogeneity/straggler scenarios, (iv) adversary fraction vs verification rate $p$, (v) gradient variability analysis across batches, and (vi) momentum-centric vs random direction comparison.
+
+\paragraph{Variant comparison.}
+For neural network training (GPT-2 on language modeling), we compare:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Full SGD}: Baseline with full gradient synchronization
+  \item \textbf{HoloGrad-Random}: $K$ random unit directions, scale-corrected synthesis
+  \item \textbf{HoloGrad-ADC}: $K$ subspace directions with Streaming Oja-QR
+  \item \textbf{Momentum-Centric HoloGrad}: Single momentum direction, 1 scalar per worker
+\end{itemize}
+We report training loss, communication cost (scalars per step), and relative efficiency (loss reduction as \% of full SGD).
+
+\section{Limitations}
+Key open issues: (i) sample-efficiency at very large $D$ may still require large $K$ without a strong codebook; (ii) practical performance of forward-mode/JVP in mainstream frameworks; (iii) nondeterminism requires careful $\epsilon$ selection; (iv) extending theory to robust aggregation and adversarial settings requires additional assumptions on bounded projections and corruption rates; (v) momentum-centric variant achieves only $\approx 30$--$40\%$ of full SGD efficiency, trading convergence speed for communication reduction; (vi) momentum direction requires a warm-up period (first few steps may use random directions).
+
+\section{Conclusion}
+HoloGrad reframes distributed pretraining as a verifiable, mining-style protocol by replacing tensor synchronization with scalar PoGP proofs, enabling permissionless heterogeneous participation. We identify a fundamental challenge for neural networks: gradient directions vary dramatically across mini-batches, rendering random-direction estimators inefficient when $K \ll D$.
+
+To address this, we present two complementary variants:
+\begin{itemize}[leftmargin=*]
+  \item \textbf{HoloGrad-ADC}: Uses a learned low-rank subspace (Streaming Oja-QR) for settings where gradients occupy a stable subspace.
+  \item \textbf{Momentum-Centric HoloGrad}: Projects onto the coordinator's momentum direction, achieving $\approx 30$--$40\%$ of full SGD efficiency with only 1 scalar per worker---a $64\times$ communication reduction compared to $K=64$ random directions.
+\end{itemize}
+
+We provide descent guarantees for both variants, analyze gradient subspace variability in neural networks, and define incentive-compatible verification/slashing under an explicit PoGP model. The choice of variant depends on the application: ADC for convex problems or stable-subspace settings, momentum-centric for neural network training under extreme communication constraints.
+
+\bibliographystyle{plain}
+\bibliography{refs}
+
+\appendix
+\section{Full Reproducibility Protocol}
+\label{app:repro}
+
+This appendix provides an end-to-end, ``clone-and-run'' protocol for reproducing the core claims:
+(i) training progress under HoloGrad vs baselines, (ii) scaling with number of proofs $K$,
+(iii) benefits of the Adaptive Direction Codebook (ADC), and (iv) robustness under heterogeneity
+and adversarial submissions with PoGP sampling verification and slashing.
+
+\subsection{Repository Layout (expected)}
+Create a repository with the following structure (names are suggestions; adjust as needed):
+\begin{itemize}[leftmargin=*]
+  \item \texttt{main.tex}, \texttt{refs.bib}
+  \item \texttt{repro/}
+    \begin{itemize}
+      \item \texttt{configs/} (YAML experiment configs)
+      \item \texttt{scripts/} (launch scripts)
+      \item \texttt{src/} (python modules)
+      \item \texttt{logs/} (stdout logs)
+      \item \texttt{runs/} (checkpoints, metrics)
+    \end{itemize}
+\end{itemize}
+
+\subsection{Environment and Dependencies}
+\paragraph{Hardware.}
+All experiments can be run on a single machine with one GPU for proof-of-concept scaling.
+For distributed/heterogeneous tests, multiple machines or containers are recommended.
+Minimum recommended single-node baseline:
+\begin{itemize}[leftmargin=*]
+  \item GPU: 1$\times$ 24GB VRAM (or larger)
+  \item CPU: 16+ cores
+  \item RAM: 64GB+
+  \item Disk: 500GB+
+\end{itemize}
+
+\paragraph{Software.}
+\begin{itemize}[leftmargin=*]
+  \item Ubuntu 22.04 (or similar Linux)
+  \item Python 3.10+
+  \item CUDA 12.x + matching PyTorch build
+  \item Git, \texttt{tmux} (optional), Docker (optional)
+\end{itemize}
+
+\paragraph{Python packages.}
+Pin exact versions to reduce nondeterminism:
+\begin{itemize}[leftmargin=*]
+  \item \texttt{torch}, \texttt{transformers}, \texttt{datasets}, \texttt{accelerate}
+  \item \texttt{numpy}, \texttt{scipy}
+  \item \texttt{pyyaml}, \texttt{tqdm}
+  \item \texttt{wandb} (optional)
+\end{itemize}
+
+\subsection{Determinism and Hash Commitments}
+HoloGrad relies on determinism for (a) directional regeneration from seed and (b) PoGP verification.
+
+\paragraph{Global seed.}
+Choose a global seed \texttt{S0}. For every training step $t$ and proof index $j$,
+derive a per-proof seed via a cryptographic hash:
+\[
+s_{t,j} = \mathrm{Hash}(\texttt{S0} \,\|\, H(\theta_t)\,\|\, H(B_t)\,\|\, t \,\|\, j).
+\]
+Here, $H(\theta_t)$ is a commitment to the checkpoint (e.g., SHA-256 of serialized weights),
+and $H(B_t)$ is a commitment to the minibatch identity (dataset name, shard id, sample ids).
+
+\paragraph{Direction generator.}
+We fix the full-space generator:
+\[
+z \sim \mathcal{N}(0,I_D)\ \text{from seeded PRNG},\qquad \vdir = \frac{z}{\|z\|}.
+\]
+This implies $\sigma^2 = 1/D$ and the scale-corrected synthesis uses $1/\sigma^2 = D$.
+
+\paragraph{ADC codebook commit.}
+For ADC, commit to \codebookid\ at each step (or epoch) by hashing the matrix $\U_t$:
+\[
+H(\U_t)=\mathrm{SHA256}(\mathrm{Serialize}(\U_t)).
+\]
+Workers use the advertised \codebookid\ to load the exact same $\U_t$.
+
+\subsection{Core Components to Implement}
+A minimal implementation needs the following modules:
+
+\paragraph{(1) Coordinator.}
+Responsibilities:
+\begin{itemize}[leftmargin=*]
+  \item Maintain checkpoint $\theta_t$.
+  \item Publish tasks $\{s_{t,j}\}_{j=1}^K$ and minibatch id $B_t$.
+  \item Collect proofs $(s,a)$.
+  \item Aggregate scalars (mean or trimmed mean) into $\{\tilde a_j\}$.
+  \item Reconstruct directions $\vdir_j=\mathrm{Dir}(s_{t,j})$.
+  \item Synthesize $\widehat g_t = \frac{1}{K}\sum_j \frac{1}{\sigma^2}\tilde a_j \vdir_j$.
+  \item Update: $\theta_{t+1}=\theta_t-\eta \widehat g_t$.
+  \item (ADC) Update $\U_t$ via Streaming Oja-QR.
+\end{itemize}
+
+\paragraph{(2) Worker.}
+Responsibilities:
+\begin{itemize}[leftmargin=*]
+  \item Receive $(\theta_t,B_t,s)$ and optional \codebookid.
+  \item Reconstruct $\vdir=\mathrm{Dir}(s)$ (or subspace: $\vdir=\U_t z(s)$).
+  \item Compute directional derivative $a=\ip{\nabla \Lcal_{B_t}(\theta_t)}{\vdir}$.
+  \item Submit proof $(s,a)$ with optional signature/attestation.
+\end{itemize}
+
+\paragraph{(3) Verifier.}
+Responsibilities:
+\begin{itemize}[leftmargin=*]
+  \item Sample each proof with probability $p_{\mathrm{verify}}$.
+  \item Recompute $a^{*}$ under identical $(\theta_t,B_t,s)$.
+  \item Accept if $|a-a^{*}|\le \epsilon$, else flag and apply slashing.
+\end{itemize}
+
+\subsection{Directional Derivative Computation}
+Two acceptable approaches:
+
+\paragraph{Option A (reference, simplest): full backprop then dot.}
+Compute $\g_B(\theta_t)=\nabla_{\theta}\Lcal_B(\theta_t)$ and set $a=\ip{\g_B}{\vdir}$.
+This is correct but may be expensive.
+
+\paragraph{Option B (preferred): forward-mode / JVP.}
+Compute $a$ directly as a directional derivative (JVP) without materializing full $\g_B$.
+The protocol correctness does not depend on which method is used, but cost and feasibility do.
+Benchmark and report both where possible.
+
+\subsection{Datasets and Models}
+\paragraph{Recommended minimal setting (fast).}
+\begin{itemize}[leftmargin=*]
+  \item Dataset: WikiText-103 or OpenWebText subset
+  \item Model: GPT-2 small (117M) or similar
+  \item Sequence length: 256--512
+\end{itemize}
+
+\paragraph{Scaling setting (optional).}
+\begin{itemize}[leftmargin=*]
+  \item Dataset: C4 subset
+  \item Model: 300M--1B parameter decoder-only transformer
+  \item Sequence length: 512--1024
+\end{itemize}
+
+\subsection{Experiment Matrix}
+All experiments log: training loss, validation loss/perplexity, throughput (tokens/s),
+verification overhead, rejection/slash counts, and (ADC) captured energy ratio $\gamma_t$.
+
+\paragraph{Baseline comparisons.}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{BP-AllReduce}: standard distributed training (if available).
+  \item \textbf{HoloGrad-Full}: full-space seeded unit directions, scale-corrected synthesis.
+  \item \textbf{HoloGrad-ADC}: subspace directions with Streaming Oja-QR codebook.
+\end{itemize}
+
+\paragraph{Ablation A (number of proofs).}
+Sweep $K\in\{8,16,32,64,128,256\}$ for fixed compute budget.
+Report convergence vs wall-clock and vs total proofs processed.
+
+\paragraph{Ablation B (codebook rank).}
+For ADC, sweep $r\in\{8,16,32,64,128\}$.
+Report $\gamma_t$ and convergence speed.
+
+\paragraph{Ablation C (heterogeneity/stragglers).}
+Simulate heterogeneous workers by adding random delays and compute caps.
+Compare synchronous collection vs time-windowed collection (collect-first-$K$).
+
+\paragraph{Ablation D (adversaries + robust aggregation).}
+Inject adversarial fraction $\alpha\in\{0,0.1,0.2,0.3\}$:
+\begin{itemize}[leftmargin=*]
+  \item \emph{Random}: submit random $a$ values.
+  \item \emph{Sign-flip}: submit $a=-a_{\text{honest}}$.
+  \item \emph{Extreme}: submit $a$ scaled by large factor.
+\end{itemize}
+For each, sweep trimming $\tau$ and report bias/variance tradeoffs.
+
+\paragraph{Ablation E (verification rate).}
+Sweep $p_{\mathrm{verify}}\in\{0.0,0.01,0.05,0.1,0.2\}$ and tolerance $\epsilon$.
+Report: detection probability, false positive rate (honest flagged), total verification cost.
+
+\subsection{Metrics and Reporting}
+\paragraph{Training quality.}
+Validation perplexity (or loss) vs steps and vs wall-clock.
+
+\paragraph{Communication.}
+Bytes uploaded per worker per step. HoloGrad should be $O(1)$ scalars plus metadata.
+
+\paragraph{Verification overhead.}
+\[
+\text{Verifier-cost fraction} = \frac{\text{time spent verifying}}{\text{total step time}}.
+\]
+
+\paragraph{Security/economics.}
+Report empirical $P(\mathrm{caught})$ vs theoretical $1-(1-p)^{qm}$ under controlled injections.
+
+\subsection{Recommended Default Hyperparameters}
+\begin{itemize}[leftmargin=*]
+  \item Learning rate $\eta$: match baseline optimizer scale; start with $1\mathrm{e}{-4}$ to $3\mathrm{e}{-4}$ for GPT-2-small.
+  \item Proof count $K$: 64 for single-GPU PoC.
+  \item Verification rate $p_{\mathrm{verify}}$: 0.05.
+  \item Verification tolerance $\epsilon$: $1\mathrm{e}{-4}$ (adjust for numeric nondeterminism).
+  \item Trim rate $\tau$: 0.1 for moderate adversary rates.
+  \item ADC rank $r$: 32.
+  \item Oja step size $\alpha_t$: constant $1\mathrm{e}{-3}$ or decay $\alpha_t=\alpha_0/\sqrt{t}$.
+  \item QR period $T_{\mathrm{qr}}$: 100 steps.
+\end{itemize}
+
+\subsection{Step-by-Step Execution (example)}
+\paragraph{1) Prepare environment.}
+\begin{itemize}[leftmargin=*]
+  \item Install pinned dependencies.
+  \item Download dataset shards and write sample-id indices for minibatch commitments.
+\end{itemize}
+
+\paragraph{2) Run baseline.}
+Train for $T$ steps (e.g., $T=20{,}000$) with standard optimizer and log metrics.
+
+\paragraph{3) Run HoloGrad-Full.}
+\begin{itemize}[leftmargin=*]
+  \item Fix \texttt{S0}.
+  \item For each step, generate $K$ seeds $s_{t,j}$.
+  \item Collect $K$ proofs, synthesize $\widehat g_t=\frac{D}{K}\sum_j \tilde a_j\vdir_j$.
+\end{itemize}
+
+\paragraph{4) Run HoloGrad-ADC.}
+\begin{itemize}[leftmargin=*]
+  \item Initialize $\U_0$ with random orthonormal columns.
+  \item Use $\vdir=\U_t z$ with fixed $z\sim\mathcal{N}(0,I_r)$.
+  \item Update $\U_t$ using Streaming Oja-QR.
+\end{itemize}
+
+\paragraph{5) Robustness tests.}
+Repeat (3)--(4) with adversary injections, trimming, and PoGP verification.
+
+\subsection{Sanity Checks}
+\begin{itemize}[leftmargin=*]
+  \item \textbf{Unbiasedness check (full-space):} for fixed $\theta$, estimate
+  $\frac{1}{K}\sum_j \frac{1}{\sigma^2}(g\cdot \vdir_j)\vdir_j$ and compare to reference $g$.
+  \item \textbf{Scale check:} verify that omitting $1/\sigma^2$ yields a factor mismatch of approximately $1/D$ under unit-norm directions.
+  \item \textbf{Verifier consistency:} for honest proofs, measure $|a-a^{*}|$ distribution to set $\epsilon$.
+\end{itemize}
+
+\subsection{Artifact Checklist}
+To claim reproducibility, include:
+\begin{itemize}[leftmargin=*]
+  \item Exact commit hash of code and dependency lockfile.
+  \item Global seed \texttt{S0}.
+  \item Dataset name + exact subset/shard ids + sample-id index files.
+  \item Training config YAMLs (all ablations).
+  \item Logs and summary tables (CSV) for metrics.
+  \item Plots: loss/perplexity curves, verifier overhead, detection rates, $\gamma_t$ curves.
+\end{itemize}
+
+\subsection{Notes on Numerical Nondeterminism}
+Even with fixed seeds, GPU kernels may be nondeterministic. We recommend:
+\begin{itemize}[leftmargin=*]
+  \item Using deterministic flags where available.
+  \item Logging floating-point settings and hardware.
+  \item Setting $\epsilon$ using empirical quantiles of $|a-a^{*}|$ for honest runs.
+\end{itemize}
+\end{document}

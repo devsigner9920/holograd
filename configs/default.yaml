@@ -1,0 +1,62 @@
+protocol:
+  K: 64
+  learning_rate: 0.0003
+  global_seed: "holograd_v1_seed_2025"
+  gradient_method: "jvp"
+
+adc:
+  rank: 32
+  oja_alpha: 0.001
+  qr_period: 100
+  enabled: true
+  normalize_columns: true
+
+verification:
+  p_verify: 0.05
+  epsilon: 0.0001
+  slash_penalty: 1.0
+  track_rates: true
+
+aggregation:
+  tau: 0.1
+  method: "trimmed_mean"
+  track_rejections: true
+
+training:
+  model_name: "gpt2"
+  model_size: "small"
+  dataset_name: "wikitext-103"
+  sequence_length: 256
+  batch_size: 8
+  max_steps: 10000
+  warmup_steps: 100
+  eval_interval: 500
+  checkpoint_interval: 1000
+  weight_decay: 0.01
+  max_grad_norm: 1.0
+
+distributed:
+  num_workers: 8
+  collection_mode: "first_k"
+  time_window: 10.0
+  simulate_delays: true
+  delay_distribution: "normal"
+  delay_mean: 0.1
+  delay_std: 0.05
+  byzantine_fraction: 0.0
+  byzantine_strategy: "random"
+
+logging:
+  output_dir: "outputs"
+  log_to_csv: true
+  log_to_json: true
+  log_to_tensorboard: true
+  log_interval: 10
+  log_training_metrics: true
+  log_communication_metrics: true
+  log_verification_metrics: true
+  log_adc_metrics: true
+  log_system_metrics: true
+
+seed: 42
+device: "cpu"
