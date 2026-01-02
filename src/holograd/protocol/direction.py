@@ -117,11 +117,21 @@ class ADCCodebook:
         return self._energy_ema
 
     def _initialize_codebook(self, seed: Optional[int] = None) -> NDArray:
+        import sys
+        import time
+
+        print(
+            f"[ADC] Initializing codebook: dim={self.dimension:,}, rank={self.rank}, dtype={self.dtype}",
+            flush=True,
+        )
+        start_time = time.time()
+
         rng = np.random.default_rng(seed)
         U = np.zeros((self.dimension, self.rank), dtype=self.dtype)
 
         chunk_size = 1_000_000
         for col in range(self.rank):
+            col_start = time.time()
             column = np.empty(self.dimension, dtype=self.dtype)
             remaining = self.dimension
             offset = 0
@@ -141,6 +151,17 @@ class ADCCodebook:
                 column = column / norm
             U[:, col] = column
 
+            col_time = time.time() - col_start
+            if (col + 1) % 4 == 0 or col == 0:
+                elapsed = time.time() - start_time
+                eta = elapsed / (col + 1) * (self.rank - col - 1)
+                print(
+                    f"[ADC] Column {col + 1}/{self.rank} done ({col_time:.1f}s), elapsed={elapsed:.1f}s, ETA={eta:.1f}s",
+                    flush=True,
+                )
+
+        total_time = time.time() - start_time
+        print(f"[ADC] Codebook initialized in {total_time:.1f}s", flush=True)
         return U
 
     def _initialize_from_gradients(
