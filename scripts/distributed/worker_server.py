@@ -30,6 +30,9 @@ class InitRequest(BaseModel):
     vocab_size: int = 100
     seq_length: int = 64
     params: Optional[List[float]] = None
+    n_layer: Optional[int] = None
+    n_head: Optional[int] = None
+    n_embd: Optional[int] = None
 
 
 class UpdateParamsRequest(BaseModel):
@@ -68,7 +71,20 @@ def health():
 def init_model(req: InitRequest):
     global model, direction_gen
 
-    model = SimpleGPT2(size=req.model_size, max_seq_len=req.seq_length, vocab_size=req.vocab_size)
+    if req.model_size == "custom" and req.n_layer and req.n_head and req.n_embd:
+        model = SimpleGPT2(
+            size="custom",
+            n_layer=req.n_layer,
+            n_head=req.n_head,
+            n_embd=req.n_embd,
+            vocab_size=req.vocab_size,
+            max_seq_len=req.seq_length,
+        )
+    else:
+        model = SimpleGPT2(
+            size=req.model_size, max_seq_len=req.seq_length, vocab_size=req.vocab_size
+        )
+
     direction_gen = DirectionGenerator(model.num_parameters)
 
     if req.params:
