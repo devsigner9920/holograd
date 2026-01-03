@@ -169,7 +169,7 @@ def run_training(
             rank=adc_rank,
             warmup_samples=0,
             alpha_decay=0.99,
-            use_power_iteration=True,
+            use_power_iteration=False,
         ),
         verification=VerificationConfig(p_verify=0.0),
         aggregation=AggregationConfig(tau=0.1),
