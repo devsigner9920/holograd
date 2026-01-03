@@ -30,7 +30,6 @@ WORKER_INSTANCES = {
     "29463765": {"host": "ssh7.vast.ai", "port": 23764, "gpu": "RTX_2060S"},
     "29463766": {"host": "ssh6.vast.ai", "port": 23766, "gpu": "Quadro_P4000"},
     "29463768": {"host": "ssh9.vast.ai", "port": 23768, "gpu": "GTX_1660_Ti"},
-    "29463777": {"host": "ssh1.vast.ai", "port": 23776, "gpu": "RTX_4070"},
     "29463778": {"host": "ssh3.vast.ai", "port": 23778, "gpu": "RTX_4060_Ti"},
     "29463780": {"host": "ssh8.vast.ai", "port": 23780, "gpu": "RTX_4070S"},
     "29464653": {"host": "ssh9.vast.ai", "port": 24652, "gpu": "GTX_1080"},
@@ -107,8 +106,7 @@ codebook_data = pickle.loads(base64.b64decode("{codebook_b64}")) if "{codebook_b
 device = "cuda" if torch.cuda.is_available() else "cpu"
 
 # Initialize model
-model = SimpleGPT2(size="small", max_seq_len=64, vocab_size=50257)
-model.to(device)
+model = SimpleGPT2(size="tiny", max_seq_len=64, vocab_size=100)
 model.set_flat_params(params)
 
 # Generate direction
@@ -219,18 +217,19 @@ def run_distributed_training(
 
     # Load dataset locally
     print("[Local] Loading dataset...")
-    train_loader, val_loader, vocab_size = create_wikitext_data(
+    from holograd.training.data import create_synthetic_data
+
+    vocab_size = 100
+    train_loader, val_loader = create_synthetic_data(
+        vocab_size=vocab_size,
         seq_length=seq_length,
+        num_train_samples=1000,
         batch_size=batch_size,
-        dataset_name="wikitext-2-raw-v1",
-        max_train_samples=10000,
-        max_val_samples=500,
     )
 
-    # Create model locally
-    print("[Local] Creating model...")
-    model = SimpleGPT2(size="small", max_seq_len=seq_length, vocab_size=vocab_size)
-    model.to(device)
+    model_size = "tiny"
+    print(f"[Local] Creating model (size={model_size})...")
+    model = SimpleGPT2(size=model_size, max_seq_len=seq_length, vocab_size=100)
     print(f"[Local] Model parameters: {model.num_parameters:,}")
 
     # Create coordinator
@@ -268,8 +267,8 @@ def run_distributed_training(
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        input_ids = batch["input_ids"].numpy()
-        labels = batch["labels"].numpy()
+        input_ids = batch.input_ids
+        labels = batch.labels
 
         # Prepare tasks
         coordinator.set_batch(input_ids.flatten(), step)
@@ -348,22 +347,14 @@ def run_distributed_training(
         model.set_flat_params(new_params)
         params = new_params
 
-        # Compute loss
-        with torch.no_grad():
-            input_t = torch.tensor(input_ids, dtype=torch.long, device=device)
-            labels_t = torch.tensor(labels, dtype=torch.long, device=device)
-            output = model(input_t)
-            loss = torch.nn.functional.cross_entropy(
-                output.view(-1, output.size(-1)),
-                labels_t.view(-1),
-            )
+        loss_val = model.compute_loss(input_ids, labels)
 
-        losses.append(loss.item())
+        losses.append(loss_val)
         step_time = time.time() - step_start
 
         if (step + 1) % 5 == 0:
             print(
-                f"Step {step + 1}/{num_steps} | Loss: {loss.item():.4f} | "
+                f"Step {step + 1}/{num_steps} | Loss: {loss_val:.4f} | "
                 f"Time: {step_time:.2f}s | Proofs: {len(proofs)}"
             )
 
