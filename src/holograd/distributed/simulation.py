@@ -105,10 +105,11 @@ class WorkerPool:
         target = first_k or len(tasks)
 
         with ThreadPoolExecutor(max_workers=self.max_threads) as executor:
-            futures = {
-                executor.submit(self._compute_single, worker, task, gradient): i
-                for i, (task, worker) in enumerate(zip(tasks, self._workers))
-            }
+            futures = {}
+            for i, task in enumerate(tasks[:target]):
+                worker = self._workers[i % self.num_workers]
+                future = executor.submit(self._compute_single, worker, task, gradient)
+                futures[future] = i
 
             for future in as_completed(futures):
                 proof = future.result()

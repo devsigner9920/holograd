@@ -53,8 +53,10 @@ class CommitmentChain:
     @staticmethod
     def hash_codebook(codebook: NDArray[np.float32], step: int) -> bytes:
         hasher = hashlib.sha256()
-        hasher.update(codebook.tobytes())
         hasher.update(step.to_bytes(8, byteorder="big"))
         for dim in codebook.shape:
             hasher.update(dim.to_bytes(4, byteorder="big"))
+        sample_size = min(10000, codebook.size)
+        indices = np.linspace(0, codebook.size - 1, sample_size, dtype=np.int64)
+        hasher.update(codebook.flat[indices].tobytes())
         return hasher.digest()
