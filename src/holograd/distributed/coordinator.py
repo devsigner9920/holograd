@@ -109,12 +109,12 @@ class Coordinator:
         use_adc_this_step = self.config.use_adc and adc_warmed_up and not use_momentum
 
         tasks = []
-        for worker_id in range(self.config.num_workers):
+        for task_id in range(self.config.proofs_per_step):
             seed = self._commitment_chain.get_worker_seed(
                 param_commitment=self.state.param_commitment,
                 batch_commitment=self.state.batch_commitment,
                 step=step,
-                worker_id=worker_id,
+                worker_id=task_id,
                 codebook_commitment=codebook_commitment,
             )
 
