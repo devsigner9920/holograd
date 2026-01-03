@@ -73,7 +73,7 @@ class WorkerManager:
         n_embd: int,
         vocab_size: int,
         seq_length: int,
-        params: List[float],
+        seed: int = 0,
     ) -> bool:
         try:
             resp = requests.post(
@@ -85,9 +85,9 @@ class WorkerManager:
                     "n_embd": n_embd,
                     "vocab_size": vocab_size,
                     "seq_length": seq_length,
-                    "params": params,
+                    "seed": seed,
                 },
-                timeout=60,
+                timeout=30,
             )
             return resp.status_code == 200
         except Exception as e:
@@ -207,6 +207,7 @@ def run_training(
     print(f"  vocab_size={vocab_size}, train_batches={len(train_loader)}")
 
     print(f"\n[4] Creating model...")
+    model_seed = 42
     model = SimpleGPT2(
         size="custom",
         n_layer=n_layer,
@@ -214,16 +215,15 @@ def run_training(
         n_embd=n_embd,
         vocab_size=vocab_size,
         max_seq_len=seq_length,
+        seed=model_seed,
     )
     print(f"  Parameters: {model.num_parameters:,}")
 
-    params = model.get_flat_params().tolist()
-
-    print(f"\n[5] Initializing {len(healthy_workers)} workers...")
+    print(f"\n[5] Initializing {len(healthy_workers)} workers (seed={model_seed})...")
     initialized_workers = []
     for wid, info in healthy_workers:
         ok = manager.init_worker(
-            info["local_port"], n_layer, n_head, n_embd, vocab_size, seq_length, params
+            info["local_port"], n_layer, n_head, n_embd, vocab_size, seq_length, model_seed
         )
         if ok:
             initialized_workers.append((wid, info))

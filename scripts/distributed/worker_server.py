@@ -33,6 +33,7 @@ class InitRequest(BaseModel):
     n_layer: Optional[int] = None
     n_head: Optional[int] = None
     n_embd: Optional[int] = None
+    seed: int = 0
 
 
 class UpdateParamsRequest(BaseModel):
@@ -79,10 +80,14 @@ def init_model(req: InitRequest):
             n_embd=req.n_embd,
             vocab_size=req.vocab_size,
             max_seq_len=req.seq_length,
+            seed=req.seed,
         )
     else:
         model = SimpleGPT2(
-            size=req.model_size, max_seq_len=req.seq_length, vocab_size=req.vocab_size
+            size=req.model_size,
+            max_seq_len=req.seq_length,
+            vocab_size=req.vocab_size,
+            seed=req.seed,
         )
 
     direction_gen = DirectionGenerator(model.num_parameters)
