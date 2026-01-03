@@ -195,9 +195,11 @@ def apply_seed_gradient(req: SeedGradientSyncRequest):
 
     if req.use_adc and adc_codebook is not None:
         scale_factor = float(adc_codebook.rank)
+        effective_dim = float(adc_codebook.rank)
         logger.info(f"[apply_seed_gradient] Using ADC, scale_factor={scale_factor}, K={K}")
     else:
         scale_factor = float(dimension)
+        effective_dim = float(dimension)
         logger.info(f"[apply_seed_gradient] Using random, scale_factor={scale_factor}, K={K}")
 
     gradient = np.zeros(dimension, dtype=np.float32)
@@ -209,7 +211,10 @@ def apply_seed_gradient(req: SeedGradientSyncRequest):
             result = direction_gen.generate(seed_bytes)
         gradient += scalar * result.direction
 
-    gradient = gradient * scale_factor / K
+    # Match coordinator's formula: (scale_factor / K) * sqrt(K / effective_dim) * sum
+    # = sqrt(scale_factor^2 / (K * effective_dim)) * sum
+    variance_correction = float(np.sqrt(K / effective_dim))
+    gradient = gradient * (scale_factor / K) * variance_correction
 
     gradient_norm = float(np.linalg.norm(gradient))
     logger.info(f"[apply_seed_gradient] Reconstructed gradient norm: {gradient_norm:.6f}")
