@@ -149,16 +149,34 @@ class ADCCodebook:
         if seed is not None:
             torch.manual_seed(seed)
 
-        print(f"[ADC] Using torch on {device}", flush=True)
+        print(f"[ADC] Using torch on {device} (Gram-Schmidt)", flush=True)
 
-        U_torch = torch.randn(self.dimension, self.rank, device=device, dtype=torch.float32)
-        Q, _ = torch.linalg.qr(U_torch)
+        U = np.zeros((self.dimension, self.rank), dtype=np.float32)
 
-        if self.dtype == np.float16:
-            Q = Q.half()
+        for col in range(self.rank):
+            col_start = time.time()
 
-        U = Q.cpu().numpy().astype(self.dtype)
-        return U
+            v = torch.randn(self.dimension, device=device, dtype=torch.float32)
+
+            if col > 0:
+                U_prev = torch.from_numpy(U[:, :col]).to(device)
+                projections = U_prev.T @ v
+                v = v - U_prev @ projections
+                del U_prev
+
+            norm = torch.linalg.norm(v)
+            if norm > 1e-10:
+                v = v / norm
+
+            U[:, col] = v.cpu().numpy()
+            del v
+            torch.cuda.empty_cache()
+
+            col_time = time.time() - col_start
+            if (col + 1) % 4 == 0 or col == 0:
+                print(f"[ADC] Column {col + 1}/{self.rank} done ({col_time:.2f}s)", flush=True)
+
+        return U.astype(self.dtype)
 
     def _initialize_codebook_numpy(self, seed: Optional[int] = None) -> NDArray:
         import time
