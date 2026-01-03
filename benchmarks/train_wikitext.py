@@ -167,7 +167,7 @@ def run_training(
         adc=ADCConfig(
             enabled=use_adc,
             rank=adc_rank,
-            warmup_samples=10,
+            warmup_samples=0,
             alpha_decay=0.99,
             use_power_iteration=True,
         ),
