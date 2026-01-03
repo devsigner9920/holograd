@@ -269,13 +269,13 @@ class ADCCodebook:
     def reconstruct_directions_batch(
         self,
         z_batch: NDArray[np.float32],
-        use_gpu: bool = True,
+        use_gpu: bool = False,
     ) -> NDArray[np.float32]:
         """Batch reconstruct multiple directions efficiently.
 
         Args:
             z_batch: Shape (rank, K) - K direction coefficients stacked as columns
-            use_gpu: Whether to use GPU for computation (if available)
+            use_gpu: Whether to use GPU for computation (disabled by default to save GPU memory for JVP)
 
         Returns:
             Shape (dimension, K) - K normalized directions as columns
