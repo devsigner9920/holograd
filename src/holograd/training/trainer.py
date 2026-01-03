@@ -47,12 +47,20 @@ class HoloGradTrainer:
         train_loader: DataLoader,
         val_loader: Optional[DataLoader] = None,
         logger: Optional[MetricsLogger] = None,
+        device: Optional[str] = None,
     ):
         self.config = config
         self.model = model
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.logger = logger
+
+        self.device: Optional[str] = None
+        if TORCH_AVAILABLE:
+            if device is None:
+                self.device = "cuda" if torch.cuda.is_available() else "cpu"
+            else:
+                self.device = device
 
         self.state = TrainerState()
 
@@ -149,13 +157,14 @@ class HoloGradTrainer:
     ) -> Callable[[NDArray[np.float32]], float]:
         input_ids_np, labels_np = batch.input_ids, batch.labels
         params_np = self.model.get_flat_params()
+        device = self.device
 
-        input_ids_t = torch.tensor(input_ids_np, dtype=torch.long)
-        labels_t = torch.tensor(labels_np, dtype=torch.long)
+        input_ids_t = torch.tensor(input_ids_np, dtype=torch.long, device=device)
+        labels_t = torch.tensor(labels_np, dtype=torch.long, device=device)
 
         def gradient_fn(direction: NDArray[np.float32]) -> float:
-            params_t = torch.tensor(params_np, dtype=torch.float32)
-            direction_t = torch.tensor(direction, dtype=torch.float32)
+            params_t = torch.tensor(params_np, dtype=torch.float32, device=device)
+            direction_t = torch.tensor(direction, dtype=torch.float32, device=device)
 
             def loss_fn(flat_params: torch.Tensor) -> torch.Tensor:
                 params_dict = self.model.flat_params_to_torch_dict(flat_params)
@@ -193,16 +202,17 @@ class HoloGradTrainer:
         if not TORCH_AVAILABLE:
             raise RuntimeError("PyTorch required for true gradient computation")
 
-        input_ids_t = torch.tensor(batch.input_ids, dtype=torch.long)
-        labels_t = torch.tensor(batch.labels, dtype=torch.long)
+        device = self.device
+        input_ids_t = torch.tensor(batch.input_ids, dtype=torch.long, device=device)
+        labels_t = torch.tensor(batch.labels, dtype=torch.long, device=device)
         params_np = self.model.get_flat_params()
-        params_t = torch.tensor(params_np, dtype=torch.float32, requires_grad=True)
+        params_t = torch.tensor(params_np, dtype=torch.float32, device=device, requires_grad=True)
 
         params_dict = self.model.flat_params_to_torch_dict(params_t)
         loss = self.model.compute_loss_torch(input_ids_t, labels_t, params_dict)
         loss.backward()
 
-        return params_t.grad.numpy().astype(np.float32)
+        return params_t.grad.cpu().numpy().astype(np.float32)
 
     def bootstrap_adc(
         self,

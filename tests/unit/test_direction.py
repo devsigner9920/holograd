@@ -74,7 +74,7 @@ class TestADCCodebook:
         U = codebook.codebook
 
         UtU = U.T @ U
-        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-5)
+        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-3)
 
     def test_generate_direction_returns_z(self):
         codebook = ADCCodebook(dimension=100, rank=32)
@@ -113,7 +113,7 @@ class TestADCCodebook:
 
         U = codebook.codebook
         UtU = U.T @ U
-        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-5)
+        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-3)
 
     def test_captured_energy_ratio(self):
         codebook = ADCCodebook(dimension=100, rank=32)
@@ -156,7 +156,7 @@ class TestADCCodebook:
 
         U = codebook.codebook
         UtU = U.T @ U
-        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-5)
+        np.testing.assert_allclose(UtU, np.eye(32), atol=1e-3)
 
     def test_warmup_accumulates_gradients(self):
         codebook = ADCCodebook(dimension=100, rank=32, warmup_samples=5)

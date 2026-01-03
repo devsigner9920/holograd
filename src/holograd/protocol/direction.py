@@ -4,6 +4,14 @@ from typing import Optional, Tuple
 import numpy as np
 from numpy.typing import NDArray
 
+try:
+    import torch
+
+    TORCH_AVAILABLE = True
+except ImportError:
+    torch = None
+    TORCH_AVAILABLE = False
+
 
 def seed_to_rng(seed: bytes) -> np.random.Generator:
     int_seed = int.from_bytes(seed[:8], byteorder="big")
@@ -117,14 +125,43 @@ class ADCCodebook:
         return self._energy_ema
 
     def _initialize_codebook(self, seed: Optional[int] = None) -> NDArray:
-        import sys
         import time
 
         print(
-            f"[ADC] Initializing codebook: dim={self.dimension:,}, rank={self.rank}, dtype={self.dtype}",
+            f"[ADC] Initializing codebook: dim={self.dimension:,}, rank={self.rank}, device={self.device}",
             flush=True,
         )
         start_time = time.time()
+
+        if TORCH_AVAILABLE and self.device != "cpu":
+            U = self._initialize_codebook_torch(seed)
+        else:
+            U = self._initialize_codebook_numpy(seed)
+
+        total_time = time.time() - start_time
+        print(f"[ADC] Codebook initialized in {total_time:.1f}s", flush=True)
+        return U
+
+    def _initialize_codebook_torch(self, seed: Optional[int] = None) -> NDArray:
+        import time
+
+        device = self.device if self.device else "cuda"
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        print(f"[ADC] Using torch on {device}", flush=True)
+
+        U_torch = torch.randn(self.dimension, self.rank, device=device, dtype=torch.float32)
+        Q, _ = torch.linalg.qr(U_torch)
+
+        if self.dtype == np.float16:
+            Q = Q.half()
+
+        U = Q.cpu().numpy().astype(self.dtype)
+        return U
+
+    def _initialize_codebook_numpy(self, seed: Optional[int] = None) -> NDArray:
+        import time
 
         rng = np.random.default_rng(seed)
         U = np.zeros((self.dimension, self.rank), dtype=self.dtype)
@@ -153,15 +190,12 @@ class ADCCodebook:
 
             col_time = time.time() - col_start
             if (col + 1) % 4 == 0 or col == 0:
-                elapsed = time.time() - start_time
-                eta = elapsed / (col + 1) * (self.rank - col - 1)
+                elapsed = time.time() - col_start
                 print(
-                    f"[ADC] Column {col + 1}/{self.rank} done ({col_time:.1f}s), elapsed={elapsed:.1f}s, ETA={eta:.1f}s",
+                    f"[ADC] Column {col + 1}/{self.rank} done ({col_time:.1f}s)",
                     flush=True,
                 )
 
-        total_time = time.time() - start_time
-        print(f"[ADC] Codebook initialized in {total_time:.1f}s", flush=True)
         return U
 
     def _initialize_from_gradients(
@@ -192,7 +226,7 @@ class ADCCodebook:
                         v = v / np.linalg.norm(v)
                         U_init[:, num_from_svd + i] = v
 
-            Q, _ = np.linalg.qr(U_init)
+            Q, _ = np.linalg.qr(U_init.astype(np.float32))
             return Q.astype(self.dtype)
 
         except np.linalg.LinAlgError:
@@ -235,7 +269,7 @@ class ADCCodebook:
                     :, min_idx
                 ] + self._current_alpha * residual_normalized
 
-        self._U, _ = np.linalg.qr(self._U)
+        self._U, _ = np.linalg.qr(self._U.astype(np.float32))
         self._U = self._U.astype(self.dtype)
 
     def _oja_update(self, gradient: NDArray[np.float32]) -> None:
@@ -244,7 +278,7 @@ class ADCCodebook:
         self._U = self._U + self._current_alpha * outer
 
         if (self._step + 1) % self.qr_period == 0:
-            self._U, _ = np.linalg.qr(self._U)
+            self._U, _ = np.linalg.qr(self._U.astype(np.float32))
             self._U = self._U.astype(self.dtype)
         else:
             norms = np.linalg.norm(self._U, axis=0, keepdims=True)

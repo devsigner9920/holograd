@@ -73,6 +73,9 @@ class TestWorker:
         )
         worker = Worker(config)
 
+        codebook = ADCCodebook(dimension=100, rank=32)
+        worker.set_codebook(codebook)
+
         task = Task(
             step=0,
             seed=b"\x00" * 32,

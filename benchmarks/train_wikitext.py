@@ -1,15 +1,19 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python3 -u
 """
 WikiText Training Benchmark with Evidence Collection.
 
 Usage:
     python benchmarks/train_wikitext.py --steps 100 --evidence
     python benchmarks/train_wikitext.py --dataset wikitext-2-raw-v1 --steps 50
+    python benchmarks/train_wikitext.py --device cuda --model-size small --steps 100
 """
 
 import argparse
+import os
 import sys
 from pathlib import Path
+
+os.environ["PYTHONUNBUFFERED"] = "1"
 
 import numpy as np
 
@@ -93,6 +97,7 @@ def run_training(
     eval_interval: int = 25,
     log_interval: int = 5,
     save_evidence: bool = True,
+    device: str = "auto",
 ) -> dict:
     if save_evidence:
         evidence = ExperimentEvidence("wikitext_training")
@@ -115,21 +120,29 @@ def run_training(
     else:
         evidence = None
 
-    print("=" * 60)
-    print("HoloGrad WikiText Training")
-    print("=" * 60)
-    print(f"Model: {model_size}")
-    print(f"Dataset: {dataset_name}")
-    print(f"Steps: {steps}")
-    print(f"Batch size: {batch_size}")
-    print(f"Sequence length: {seq_length}")
-    print(f"Learning rate: {lr}")
-    print(f"K (directions): {K}")
-    print(f"Workers: {num_workers}")
-    print(f"ADC: {'enabled (rank=' + str(adc_rank) + ')' if use_adc else 'disabled'}")
-    print("-" * 60)
+    import torch
 
-    print("Loading WikiText dataset...")
+    if device == "auto":
+        actual_device = "cuda" if torch.cuda.is_available() else "cpu"
+    else:
+        actual_device = device
+
+    print("=" * 60, flush=True)
+    print("HoloGrad WikiText Training", flush=True)
+    print("=" * 60, flush=True)
+    print(f"Model: {model_size}", flush=True)
+    print(f"Dataset: {dataset_name}", flush=True)
+    print(f"Steps: {steps}", flush=True)
+    print(f"Batch size: {batch_size}", flush=True)
+    print(f"Sequence length: {seq_length}", flush=True)
+    print(f"Learning rate: {lr}", flush=True)
+    print(f"K (directions): {K}", flush=True)
+    print(f"Workers: {num_workers}", flush=True)
+    print(f"ADC: {'enabled (rank=' + str(adc_rank) + ')' if use_adc else 'disabled'}", flush=True)
+    print(f"Device: {actual_device}", flush=True)
+    print("-" * 60, flush=True)
+
+    print("Loading WikiText dataset...", flush=True)
     train_loader, val_loader, vocab_size = create_wikitext_data(
         seq_length=seq_length,
         batch_size=batch_size,
@@ -137,12 +150,12 @@ def run_training(
         max_train_samples=max_train_samples,
         max_val_samples=max_val_samples,
     )
-    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}")
-    print(f"Vocab size: {vocab_size}")
+    print(f"Train batches: {len(train_loader)}, Val batches: {len(val_loader)}", flush=True)
+    print(f"Vocab size: {vocab_size}", flush=True)
 
-    print("Creating model...")
+    print("Creating model...", flush=True)
     model = SimpleGPT2(size=model_size, max_seq_len=seq_length, vocab_size=vocab_size)
-    print(f"Model parameters: {model.num_parameters:,}")
+    print(f"Model parameters: {model.num_parameters:,}", flush=True)
 
     config = HoloGradConfig(
         protocol=ProtocolConfig(
@@ -172,17 +185,18 @@ def run_training(
         logging=LoggingConfig(log_interval=log_interval),
     )
 
-    print("Initializing trainer...")
+    print("Initializing trainer...", flush=True)
     trainer = HoloGradTrainer(
         config=config,
         model=model,
         train_loader=train_loader,
         val_loader=val_loader,
+        device=actual_device,
     )
 
-    print("-" * 60)
-    print("Starting training...")
-    print("-" * 60)
+    print("-" * 60, flush=True)
+    print("Starting training...", flush=True)
+    print("-" * 60, flush=True)
 
     val_losses = []
 
@@ -199,13 +213,14 @@ def run_training(
         if (step + 1) % log_interval == 0:
             print(
                 f"Step {step + 1}/{steps} | Loss: {metrics.loss:.4f} | "
-                f"Time: {metrics.step_time:.2f}s | Energy: {metrics.captured_energy_ratio:.3f}"
+                f"Time: {metrics.step_time:.2f}s | Energy: {metrics.captured_energy_ratio:.3f}",
+                flush=True,
             )
 
         if (step + 1) % eval_interval == 0:
             val_loss = trainer.evaluate()
             val_losses.append((step + 1, val_loss))
-            print(f"  -> Val Loss: {val_loss:.4f}")
+            print(f"  -> Val Loss: {val_loss:.4f}", flush=True)
 
     final_val_loss = trainer.evaluate()
 
@@ -279,6 +294,7 @@ def main():
     parser.add_argument("--log-interval", type=int, default=5)
     parser.add_argument("--evidence", action="store_true", default=True)
     parser.add_argument("--no-evidence", dest="evidence", action="store_false")
+    parser.add_argument("--device", type=str, default="auto", choices=["auto", "cuda", "cpu"])
 
     args = parser.parse_args()
 
@@ -298,6 +314,7 @@ def main():
         eval_interval=args.eval_interval,
         log_interval=args.log_interval,
         save_evidence=args.evidence,
+        device=args.device,
     )
 
 

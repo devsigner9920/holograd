@@ -29,12 +29,6 @@ class Worker:
         self._direction_gen = DirectionGenerator(config.dimension)
         self._adc_codebook: Optional[ADCCodebook] = None
 
-        if config.use_adc:
-            self._adc_codebook = ADCCodebook(
-                dimension=config.dimension,
-                rank=config.adc_rank,
-            )
-
         self._gradient_fn = gradient_fn
 
     def set_gradient_fn(self, fn: Callable[[NDArray[np.float32]], float]) -> None:
