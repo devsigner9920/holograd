@@ -12,3 +12,4 @@ omegaconf>=2.3.0
 tensorboard>=2.15.0
 tqdm>=4.66.0
 rich>=13.0.0
+pyzmq>=25.0.0

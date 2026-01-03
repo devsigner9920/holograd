@@ -85,6 +85,7 @@ class ADCCodebook:
         self.qr_period = qr_period
         self.dtype = dtype
         self.device = device
+        self._use_gpu = TORCH_AVAILABLE and device != "cpu"
 
         self.warmup_samples = warmup_samples
         self._warmup_buffer: list[NDArray[np.float32]] = []
@@ -98,11 +99,27 @@ class ADCCodebook:
         self.power_iteration_steps = power_iteration_steps
 
         self._U: NDArray = self._initialize_codebook()
+        self._U_gpu = None
         self._step = 0
 
         self._energy_history: list[float] = []
         self._energy_ema = 0.0
         self._energy_ema_alpha = 0.1
+
+    def _ensure_gpu_codebook(self) -> None:
+        if self._use_gpu and self._U_gpu is None:
+            self._U_gpu = torch.from_numpy(self._U.astype(np.float32)).to(self.device)
+
+    def _sync_cpu_from_gpu(self) -> None:
+        if self._U_gpu is not None:
+            self._U = self._U_gpu.cpu().numpy().astype(self.dtype)
+
+    def _invalidate_gpu_cache(self) -> None:
+        if self._U_gpu is not None:
+            del self._U_gpu
+            self._U_gpu = None
+            if TORCH_AVAILABLE and torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
     @property
     def codebook(self) -> NDArray[np.float32]:
@@ -253,34 +270,47 @@ class ADCCodebook:
     def generate_direction(self, seed: bytes) -> DirectionResult:
         rng = seed_to_rng(seed)
         z = rng.standard_normal(self.rank).astype(np.float32)
-        direction = self._U.astype(np.float32) @ z
-        norm = np.linalg.norm(direction)
-        if norm > 1e-10:
-            direction = direction / norm
-        return DirectionResult(direction=direction.astype(np.float32), z_projection=z)
+
+        if self._use_gpu:
+            self._ensure_gpu_codebook()
+            z_t = torch.from_numpy(z).to(self.device)
+            direction_t = self._U_gpu @ z_t
+            norm = torch.linalg.norm(direction_t)
+            if norm > 1e-10:
+                direction_t = direction_t / norm
+            direction = direction_t.cpu().numpy().astype(np.float32)
+        else:
+            direction = self._U.astype(np.float32) @ z
+            norm = np.linalg.norm(direction)
+            if norm > 1e-10:
+                direction = direction / norm
+            direction = direction.astype(np.float32)
+
+        return DirectionResult(direction=direction, z_projection=z)
 
     def reconstruct_direction(self, z: NDArray[np.float32]) -> NDArray[np.float32]:
-        direction = self._U.astype(np.float32) @ z.astype(np.float32)
-        norm = np.linalg.norm(direction)
-        if norm > 1e-10:
-            direction = direction / norm
-        return direction.astype(np.float32)
+        if self._use_gpu:
+            self._ensure_gpu_codebook()
+            z_t = torch.from_numpy(z.astype(np.float32)).to(self.device)
+            direction_t = self._U_gpu @ z_t
+            norm = torch.linalg.norm(direction_t)
+            if norm > 1e-10:
+                direction_t = direction_t / norm
+            return direction_t.cpu().numpy().astype(np.float32)
+        else:
+            direction = self._U.astype(np.float32) @ z.astype(np.float32)
+            norm = np.linalg.norm(direction)
+            if norm > 1e-10:
+                direction = direction / norm
+            return direction.astype(np.float32)
 
     def reconstruct_directions_batch(
         self,
         z_batch: NDArray[np.float32],
-        use_gpu: bool = False,
+        use_gpu: bool = True,
     ) -> NDArray[np.float32]:
-        """Batch reconstruct multiple directions efficiently.
-
-        Args:
-            z_batch: Shape (rank, K) - K direction coefficients stacked as columns
-            use_gpu: Whether to use GPU for computation (disabled by default to save GPU memory for JVP)
-
-        Returns:
-            Shape (dimension, K) - K normalized directions as columns
-        """
-        if use_gpu and TORCH_AVAILABLE and self.device != "cpu":
+        """Batch reconstruct directions. Uses GPU by default when available."""
+        if use_gpu and self._use_gpu:
             return self._reconstruct_batch_torch(z_batch)
         return self._reconstruct_batch_numpy(z_batch)
 
@@ -291,29 +321,13 @@ class ADCCodebook:
         return directions / norms
 
     def _reconstruct_batch_torch(self, z_batch: NDArray[np.float32]) -> NDArray[np.float32]:
-        K = z_batch.shape[1]
-        chunk_size = 4
-        device = self.device
-        U_t = torch.from_numpy(self._U.astype(np.float32)).to(device)
-
-        result_chunks = []
-        for i in range(0, K, chunk_size):
-            end_idx = min(i + chunk_size, K)
-            Z_chunk = torch.from_numpy(z_batch[:, i:end_idx].astype(np.float32)).to(device)
-
-            dirs_chunk = U_t @ Z_chunk
-            norms = torch.linalg.norm(dirs_chunk, dim=0, keepdim=True)
-            norms = torch.clamp(norms, min=1e-10)
-            dirs_chunk = dirs_chunk / norms
-
-            result_chunks.append(dirs_chunk.cpu().numpy())
-            del Z_chunk, dirs_chunk
-            torch.cuda.empty_cache()
-
-        del U_t
-        torch.cuda.empty_cache()
-
-        return np.concatenate(result_chunks, axis=1)
+        self._ensure_gpu_codebook()
+        Z_t = torch.from_numpy(z_batch.astype(np.float32)).to(self.device)
+        directions_t = self._U_gpu @ Z_t
+        norms = torch.linalg.norm(directions_t, dim=0, keepdim=True)
+        norms = torch.clamp(norms, min=1e-10)
+        directions_t = directions_t / norms
+        return directions_t.cpu().numpy().astype(np.float32)
 
     def _update_alpha(self) -> None:
         if self.alpha_decay < 1.0:
@@ -340,6 +354,12 @@ class ADCCodebook:
         self._U = self._U.astype(self.dtype)
 
     def _oja_update(self, gradient: NDArray[np.float32]) -> None:
+        if self._use_gpu:
+            self._oja_update_gpu(gradient)
+        else:
+            self._oja_update_cpu(gradient)
+
+    def _oja_update_cpu(self, gradient: NDArray[np.float32]) -> None:
         projection = self._U.T @ gradient
         outer = np.outer(gradient, projection)
         self._U = self._U + self._current_alpha * outer
@@ -350,6 +370,24 @@ class ADCCodebook:
         else:
             norms = np.linalg.norm(self._U, axis=0, keepdims=True)
             self._U = self._U / norms
+
+    def _oja_update_gpu(self, gradient: NDArray[np.float32]) -> None:
+        self._ensure_gpu_codebook()
+
+        g_t = torch.from_numpy(gradient.astype(np.float32)).to(self.device)
+        projection = self._U_gpu.T @ g_t
+        outer = torch.outer(g_t, projection)
+        self._U_gpu = self._U_gpu + self._current_alpha * outer
+
+        if (self._step + 1) % self.qr_period == 0:
+            self._U_gpu, _ = torch.linalg.qr(self._U_gpu)
+            self._sync_cpu_from_gpu()
+        else:
+            norms = torch.linalg.norm(self._U_gpu, dim=0, keepdim=True)
+            self._U_gpu = self._U_gpu / norms
+
+        del g_t, projection, outer
+        torch.cuda.empty_cache()
 
     def update(self, gradient: NDArray[np.float32]) -> None:
         energy = self.captured_energy_ratio(gradient)
