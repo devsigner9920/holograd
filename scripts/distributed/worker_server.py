@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import sys
+import logging
 
 sys.path.insert(0, "/root/holograd/src")
 
@@ -16,6 +17,13 @@ from holograd.training.model import SimpleGPT2
 from holograd.protocol.direction import DirectionGenerator, ADCCodebook
 from holograd.gradient.jvp import compute_jvp_gradient_projection
 
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    handlers=[logging.StreamHandler()],
+)
+logger = logging.getLogger(__name__)
 
 app = FastAPI()
 
@@ -187,8 +195,10 @@ def apply_seed_gradient(req: SeedGradientSyncRequest):
 
     if req.use_adc and adc_codebook is not None:
         scale_factor = float(adc_codebook.rank)
+        logger.info(f"[apply_seed_gradient] Using ADC, scale_factor={scale_factor}, K={K}")
     else:
         scale_factor = float(dimension)
+        logger.info(f"[apply_seed_gradient] Using random, scale_factor={scale_factor}, K={K}")
 
     gradient = np.zeros(dimension, dtype=np.float32)
     for seed_hex, scalar in zip(req.seeds, req.scalars):
@@ -201,11 +211,22 @@ def apply_seed_gradient(req: SeedGradientSyncRequest):
 
     gradient = gradient * scale_factor / K
 
+    gradient_norm = float(np.linalg.norm(gradient))
+    logger.info(f"[apply_seed_gradient] Reconstructed gradient norm: {gradient_norm:.6f}")
+    logger.info(
+        f"[apply_seed_gradient] Scalars: mean={np.mean(req.scalars):.6f}, std={np.std(req.scalars):.6f}"
+    )
+
     current_params = model.get_flat_params()
     new_params = (current_params - req.learning_rate * gradient).astype(np.float32)
     model.set_flat_params(new_params)
 
-    return {"status": "seed_gradient_applied", "gradient_norm": float(np.linalg.norm(gradient))}
+    param_change = float(np.linalg.norm(new_params - current_params))
+    logger.info(
+        f"[apply_seed_gradient] Param change norm: {param_change:.6f}, lr={req.learning_rate}"
+    )
+
+    return {"status": "seed_gradient_applied", "gradient_norm": gradient_norm}
 
 
 @app.post("/compute", response_model=TaskResponse)
@@ -226,9 +247,15 @@ def compute_jvp(req: TaskRequest):
         direction = result.direction
         if result.z_projection is not None:
             adc_projection = result.z_projection.tolist()
+        logger.info(f"[Step {req.step}] Using ADC codebook, rank={adc_codebook.rank}")
     else:
         result = direction_gen.generate(seed_bytes)
         direction = result.direction
+        logger.info(f"[Step {req.step}] Using random direction generator")
+
+    # Log direction properties
+    direction_norm = float(np.linalg.norm(direction))
+    logger.info(f"[Step {req.step}] Direction norm: {direction_norm:.6f} (should be ~1.0)")
 
     input_ids_t = torch.tensor(input_ids, dtype=torch.long, device=device)
     labels_t = torch.tensor(labels, dtype=torch.long, device=device)
@@ -243,6 +270,10 @@ def compute_jvp(req: TaskRequest):
     )
     elapsed = time.time() - start
 
+    # Log scalar value (this is the gradient projection <g, v>)
+    logger.info(f"[Step {req.step}] Scalar (gradient projection): {scalar:.6f}")
+    logger.info(f"[Step {req.step}] Compute time: {elapsed:.3f}s")
+
     return TaskResponse(
         step=req.step,
         seed=req.seed,
@@ -251,6 +282,51 @@ def compute_jvp(req: TaskRequest):
         time=elapsed,
         device=device,
     )
+
+
+class DiagnosticRequest(BaseModel):
+    input_ids: List[List[int]]
+    labels: List[List[int]]
+
+
+@app.post("/diagnostic")
+def run_diagnostic(req: DiagnosticRequest):
+    """Compute full gradient and return diagnostic info."""
+    global model
+
+    if model is None:
+        return {"error": "Model not initialized"}
+
+    input_ids = np.array(req.input_ids, dtype=np.int64)
+    labels = np.array(req.labels, dtype=np.int64)
+
+    input_ids_t = torch.tensor(input_ids, dtype=torch.long, device=device)
+    labels_t = torch.tensor(labels, dtype=torch.long, device=device)
+
+    # Compute full gradient
+    flat_params = model.get_flat_params()
+    flat_params_t = torch.tensor(
+        flat_params, dtype=torch.float32, device=device, requires_grad=True
+    )
+
+    params_dict = model.flat_params_to_torch_dict(flat_params_t)
+    logits = model.forward_torch(input_ids_t, params_dict)
+    loss = torch.nn.functional.cross_entropy(
+        logits.view(-1, logits.size(-1)),
+        labels_t.view(-1),
+    )
+
+    grad = torch.autograd.grad(loss, flat_params_t)[0]
+    grad_np = grad.cpu().numpy()
+
+    return {
+        "loss": float(loss.item()),
+        "gradient_norm": float(np.linalg.norm(grad_np)),
+        "gradient_mean": float(np.mean(grad_np)),
+        "gradient_std": float(np.std(grad_np)),
+        "gradient_max": float(np.max(np.abs(grad_np))),
+        "num_parameters": model.num_parameters,
+    }
 
 
 if __name__ == "__main__":
