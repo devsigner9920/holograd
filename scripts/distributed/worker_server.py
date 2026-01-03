@@ -56,6 +56,13 @@ class CodebookRequest(BaseModel):
     dimension: int
 
 
+class CodebookB64Request(BaseModel):
+    U_b64: str
+    rank: int
+    dimension: int
+    dtype: str = "float16"
+
+
 class GradientSyncRequest(BaseModel):
     z_agg: List[float]
     learning_rate: float
@@ -165,6 +172,41 @@ def update_codebook(req: CodebookRequest):
     adc_codebook._is_warmed_up = True  # Mark as warmed up since we received learned codebook
 
     logger.info(f"[update_codebook] Codebook updated successfully")
+
+    return {"status": "codebook_updated", "shape": list(U_array.shape)}
+
+
+@app.post("/update_codebook_b64")
+def update_codebook_b64(req: CodebookB64Request):
+    """Update codebook using base64-encoded binary data for efficiency."""
+    global adc_codebook
+    import base64
+
+    logger.info(
+        f"[update_codebook_b64] Receiving codebook: dimension={req.dimension}, rank={req.rank}, dtype={req.dtype}"
+    )
+
+    # Decode base64 to bytes
+    codebook_bytes = base64.b64decode(req.U_b64)
+
+    # Convert to numpy array
+    if req.dtype == "float16":
+        U_array = np.frombuffer(codebook_bytes, dtype=np.float16).reshape(req.dimension, req.rank)
+        U_array = U_array.astype(np.float32)  # Convert to float32 for computation
+    else:
+        U_array = np.frombuffer(codebook_bytes, dtype=np.float32).reshape(req.dimension, req.rank)
+
+    logger.info(f"[update_codebook_b64] Decoded codebook shape: {U_array.shape}")
+
+    adc_codebook = ADCCodebook(
+        dimension=req.dimension,
+        rank=req.rank,
+        device=device,
+    )
+    adc_codebook._U = U_array
+    adc_codebook._is_warmed_up = True
+
+    logger.info(f"[update_codebook_b64] Codebook updated successfully")
 
     return {"status": "codebook_updated", "shape": list(U_array.shape)}
 

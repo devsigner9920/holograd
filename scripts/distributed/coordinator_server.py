@@ -425,22 +425,29 @@ def run_training(config: TrainRequest):
                     f"[Step {step}] Codebook shape: {codebook_U.shape}, size: {codebook_U.nbytes / 1024 / 1024:.1f}MB"
                 )
 
-                # Send codebook to each worker (dimension x rank matrix)
-                # Note: This is ~200MB for D=3.2M, rank=16. Will be slow but works.
-                codebook_list = codebook_U.tolist()
+                # Send codebook to each worker using base64-encoded binary for efficiency
+                import base64
+
+                codebook_bytes = codebook_U.astype(np.float16).tobytes()
+                codebook_b64 = base64.b64encode(codebook_bytes).decode("ascii")
+                logger.info(
+                    f"[Step {step}] Codebook encoded size: {len(codebook_b64) / 1024 / 1024:.1f}MB"
+                )
+
                 with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
 
                     def sync_codebook(worker_info):
                         wid, url = worker_info
                         try:
                             resp = client.session.post(
-                                f"{url}/update_codebook",
+                                f"{url}/update_codebook_b64",
                                 json={
-                                    "U": codebook_list,
+                                    "U_b64": codebook_b64,
                                     "rank": coordinator.codebook.rank,
                                     "dimension": coordinator.codebook.dimension,
+                                    "dtype": "float16",
                                 },
-                                timeout=120,
+                                timeout=300,
                             )
                             return resp.status_code == 200
                         except Exception as e:
