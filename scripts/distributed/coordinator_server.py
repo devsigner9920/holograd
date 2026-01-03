@@ -426,45 +426,74 @@ def run_training(config: TrainRequest):
                 )
 
                 # Send codebook to each worker using base64-encoded binary for efficiency
+                # Use int8 quantization to reduce size by 4x (from float32)
                 import base64
 
-                codebook_bytes = codebook_U.astype(np.float16).tobytes()
+                # Quantize to int8: scale to [-127, 127] range
+                codebook_max = np.max(np.abs(codebook_U))
+                codebook_scale = codebook_max / 127.0 if codebook_max > 0 else 1.0
+                codebook_int8 = (codebook_U / codebook_scale).astype(np.int8)
+                codebook_bytes = codebook_int8.tobytes()
                 codebook_b64 = base64.b64encode(codebook_bytes).decode("ascii")
                 logger.info(
-                    f"[Step {step}] Codebook encoded size: {len(codebook_b64) / 1024 / 1024:.1f}MB"
+                    f"[Step {step}] Codebook encoded size: {len(codebook_b64) / 1024 / 1024:.1f}MB (int8 quantized)"
                 )
 
-                with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+                # Use as_completed with short timeout for non-blocking partial sync
+                sync_count = 0
+                sync_timeout = 60  # seconds per worker
+                min_sync_required = max(3, len(healthy_workers) // 2)  # At least 50% or 3 workers
 
-                    def sync_codebook(worker_info):
-                        wid, url = worker_info
+                with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+                    futures = {}
+                    for wid, url in healthy_workers:
+                        future = executor.submit(
+                            lambda u, w: (
+                                w,
+                                client.session.post(
+                                    f"{u}/update_codebook_b64",
+                                    json={
+                                        "U_b64": codebook_b64,
+                                        "rank": coordinator.codebook.rank,
+                                        "dimension": coordinator.codebook.dimension,
+                                        "dtype": "int8",
+                                        "scale": float(codebook_scale),
+                                    },
+                                    timeout=sync_timeout,
+                                ),
+                            ),
+                            url,
+                            wid,
+                        )
+                        futures[future] = wid
+
+                    for future in as_completed(futures, timeout=sync_timeout + 10):
+                        wid = futures[future]
                         try:
-                            resp = client.session.post(
-                                f"{url}/update_codebook_b64",
-                                json={
-                                    "U_b64": codebook_b64,
-                                    "rank": coordinator.codebook.rank,
-                                    "dimension": coordinator.codebook.dimension,
-                                    "dtype": "float16",
-                                },
-                                timeout=300,
-                            )
-                            return resp.status_code == 200
+                            worker_id, resp = future.result(timeout=5)
+                            if resp.status_code == 200:
+                                sync_count += 1
+                                logger.info(f"[Step {step}] Codebook synced to {worker_id}")
                         except Exception as e:
                             logger.error(f"[Step {step}] Failed to sync codebook to {wid}: {e}")
-                            return False
 
-                    results = list(executor.map(sync_codebook, healthy_workers))
-                    sync_count = sum(results)
+                logger.info(
+                    f"[Step {step}] Codebook synced to {sync_count}/{len(healthy_workers)} workers"
+                )
+
+                if sync_count >= min_sync_required:
+                    codebook_synced = True
+                    with state_lock:
+                        state.codebook_synced = True
+                        state.adc_warmed_up = True
+                        state.adc_warmup_current = state.adc_warmup_needed
                     logger.info(
-                        f"[Step {step}] Codebook synced to {sync_count}/{len(healthy_workers)} workers"
+                        f"[Step {step}] ADC enabled! Codebook synced to {sync_count} workers."
                     )
-
-                codebook_synced = True
-                with state_lock:
-                    state.codebook_synced = True
-                    state.adc_warmed_up = True
-                    state.adc_warmup_current = state.adc_warmup_needed
+                else:
+                    logger.warning(
+                        f"[Step {step}] Only {sync_count} workers synced, need {min_sync_required}. Continuing without ADC."
+                    )
 
             with state_lock:
                 if not codebook_synced and coordinator.codebook:

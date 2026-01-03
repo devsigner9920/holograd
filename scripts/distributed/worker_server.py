@@ -61,6 +61,7 @@ class CodebookB64Request(BaseModel):
     rank: int
     dimension: int
     dtype: str = "float16"
+    scale: float = 1.0  # For int8 quantization
 
 
 class GradientSyncRequest(BaseModel):
@@ -183,20 +184,26 @@ def update_codebook_b64(req: CodebookB64Request):
     import base64
 
     logger.info(
-        f"[update_codebook_b64] Receiving codebook: dimension={req.dimension}, rank={req.rank}, dtype={req.dtype}"
+        f"[update_codebook_b64] Receiving codebook: dimension={req.dimension}, rank={req.rank}, dtype={req.dtype}, scale={req.scale}"
     )
 
     # Decode base64 to bytes
     codebook_bytes = base64.b64decode(req.U_b64)
 
-    # Convert to numpy array
-    if req.dtype == "float16":
+    # Convert to numpy array based on dtype
+    if req.dtype == "int8":
+        # Dequantize: int8 * scale -> float32
+        U_int8 = np.frombuffer(codebook_bytes, dtype=np.int8).reshape(req.dimension, req.rank)
+        U_array = U_int8.astype(np.float32) * req.scale
+    elif req.dtype == "float16":
         U_array = np.frombuffer(codebook_bytes, dtype=np.float16).reshape(req.dimension, req.rank)
-        U_array = U_array.astype(np.float32)  # Convert to float32 for computation
+        U_array = U_array.astype(np.float32)
     else:
         U_array = np.frombuffer(codebook_bytes, dtype=np.float32).reshape(req.dimension, req.rank)
 
-    logger.info(f"[update_codebook_b64] Decoded codebook shape: {U_array.shape}")
+    logger.info(
+        f"[update_codebook_b64] Decoded codebook shape: {U_array.shape}, norm: {np.linalg.norm(U_array[:, 0]):.4f}"
+    )
 
     adc_codebook = ADCCodebook(
         dimension=req.dimension,
