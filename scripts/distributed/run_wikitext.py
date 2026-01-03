@@ -229,8 +229,9 @@ def run_training(
         else:
             print(f"  {wid}: not responding")
 
-    if len(healthy_workers) < K // 2:
-        print(f"Not enough healthy workers ({len(healthy_workers)} < {K // 2})")
+    min_workers = 3
+    if len(healthy_workers) < min_workers:
+        print(f"Not enough healthy workers ({len(healthy_workers)} < {min_workers})")
         manager.cleanup()
         return
 
@@ -281,8 +282,8 @@ def run_training(
         else:
             print(f"  {wid}: failed")
 
-    if len(initialized_workers) < K // 2:
-        print(f"Not enough initialized workers")
+    if len(initialized_workers) < min_workers:
+        print(f"Not enough initialized workers ({len(initialized_workers)} < {min_workers})")
         manager.cleanup()
         return
 
@@ -293,14 +294,18 @@ def run_training(
         dimension=model.num_parameters,
         num_workers=len(healthy_workers),
         proofs_per_step=K,
-        use_adc=False,
+        use_adc=True,
+        adc_rank=adc_rank,
+        adc_warmup_samples=20,
         learning_rate=learning_rate,
         device="cpu",
     )
     coordinator = Coordinator(coord_config)
     coordinator.set_parameters(model.get_flat_params())
 
-    print(f"  Coordinator ADC: {coordinator.config.use_adc}")
+    print(
+        f"  Coordinator ADC: {coordinator.config.use_adc}, warmup={coord_config.adc_warmup_samples}"
+    )
 
     print(f"\n[7] Starting training ({num_steps} steps)...")
     print("-" * 70)
@@ -308,6 +313,7 @@ def run_training(
     train_iter = iter(train_loader)
     losses = []
     start_time = time.time()
+    codebook_synced = False
 
     for step in range(num_steps):
         step_start = time.time()
@@ -325,9 +331,9 @@ def run_training(
         tasks = coordinator.publish_tasks(step)
 
         proofs = []
-        with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+        with ThreadPoolExecutor(max_workers=len(healthy_workers) * 2) as executor:
             futures = {}
-            for i, task in enumerate(tasks[: len(healthy_workers)]):
+            for i, task in enumerate(tasks):
                 wid, info = healthy_workers[i % len(healthy_workers)]
                 future = executor.submit(
                     manager.compute_task,
@@ -338,14 +344,15 @@ def run_training(
                     input_ids,
                     labels,
                 )
-                futures[future] = wid
+                futures[future] = (wid, task.seed)
 
             for future in as_completed(futures):
                 result = future.result()
                 if result:
+                    wid, _ = futures[future]
                     proof = Proof(
                         step=result["step"],
-                        worker_id=int(futures[future]),
+                        worker_id=int(wid),
                         seed=bytes.fromhex(result["seed"]),
                         scalar=result["scalar"],
                         timestamp=time.time(),
@@ -356,7 +363,7 @@ def run_training(
                     proofs.append(proof)
                     coordinator.collect_proof(proof)
 
-        if len(proofs) < K // 2:
+        if len(proofs) < min_workers:
             print(f"Step {step}: Only {len(proofs)} proofs, skipping")
             continue
 
@@ -364,6 +371,26 @@ def run_training(
         new_params = coordinator.update_parameters(gradient)
         model.set_flat_params(new_params)
 
+        if (
+            coordinator.codebook is not None
+            and coordinator.codebook.is_warmed_up
+            and not codebook_synced
+        ):
+            print(f"\n  [ADC Warmup Complete] Syncing codebook to workers...")
+            U = coordinator.codebook.codebook.tolist()
+            sync_start = time.time()
+            cb_ok = 0
+            for wid, info in healthy_workers:
+                if manager.update_worker_codebook(
+                    info["local_port"], U, adc_rank, model.num_parameters
+                ):
+                    cb_ok += 1
+            print(
+                f"  Codebook synced to {cb_ok}/{len(healthy_workers)} workers in {time.time() - sync_start:.1f}s\n"
+            )
+            codebook_synced = True
+
+        use_adc_for_sync = codebook_synced and coordinator.codebook is not None
         seeds_hex = [p.seed.hex() for p in proofs]
         scalars_list = [p.scalar for p in proofs]
         sync_ok = 0
@@ -375,7 +402,7 @@ def run_training(
                     seeds_hex,
                     scalars_list,
                     learning_rate,
-                    False,
+                    use_adc_for_sync,
                 )
                 for wid, info in healthy_workers
             ]
@@ -383,7 +410,9 @@ def run_training(
                 if f.result():
                     sync_ok += 1
         if step == 0:
-            print(f"  Gradient sync: {sync_ok}/{len(healthy_workers)} workers")
+            print(
+                f"  Gradient sync: {sync_ok}/{len(healthy_workers)} workers (ADC={use_adc_for_sync})"
+            )
 
         loss_val = model.compute_loss(batch.input_ids, batch.labels)
         losses.append(loss_val)
