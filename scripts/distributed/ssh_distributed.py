@@ -22,17 +22,20 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 import numpy as np
 
 
-# Worker instances configuration
 WORKER_INSTANCES = {
     "29463757": {"host": "ssh2.vast.ai", "port": 23756, "gpu": "GTX_1080"},
     "29463761": {"host": "ssh5.vast.ai", "port": 23760, "gpu": "RTX_2060"},
-    "29463763": {"host": "ssh2.vast.ai", "port": 23762, "gpu": "RTX_3060"},
+    "29463762": {"host": "ssh2.vast.ai", "port": 23762, "gpu": "GTX_1660_S"},
     "29463764": {"host": "ssh2.vast.ai", "port": 23764, "gpu": "RTX_3070"},
     "29463765": {"host": "ssh7.vast.ai", "port": 23764, "gpu": "RTX_2060S"},
     "29463766": {"host": "ssh6.vast.ai", "port": 23766, "gpu": "Quadro_P4000"},
     "29463768": {"host": "ssh9.vast.ai", "port": 23768, "gpu": "GTX_1660_Ti"},
+    "29463777": {"host": "ssh1.vast.ai", "port": 23776, "gpu": "RTX_4070"},
     "29463778": {"host": "ssh3.vast.ai", "port": 23778, "gpu": "RTX_4060_Ti"},
     "29463780": {"host": "ssh8.vast.ai", "port": 23780, "gpu": "RTX_4070S"},
+    "29464653": {"host": "ssh9.vast.ai", "port": 24652, "gpu": "GTX_1080"},
+    "29464654": {"host": "ssh6.vast.ai", "port": 24654, "gpu": "GTX_1080"},
+    "29464657": {"host": "ssh4.vast.ai", "port": 24656, "gpu": "GTX_1080"},
 }
 
 
