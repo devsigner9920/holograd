@@ -253,31 +253,61 @@ class HoloGradTrainer:
 
         return losses
 
-    def train_step(self, batch: BatchData) -> StepMetrics:
+    def train_step(self, batch: BatchData, debug: bool = False) -> StepMetrics:
         step_start = time.perf_counter()
+        step_num = self.state.step
+
+        if debug:
+            print(f"[DEBUG] Step {step_num}: Starting train_step", flush=True)
 
         self._current_batch = batch
         params = self.model.get_flat_params()
         self._coordinator.set_parameters(params)
         self._coordinator.set_batch(batch.indices, batch.batch_seed)
 
+        t0 = time.perf_counter()
         tasks = self._coordinator.publish_tasks(self.state.step)
+        if debug:
+            print(
+                f"[DEBUG] Step {step_num}: publish_tasks done ({time.perf_counter() - t0:.2f}s)",
+                flush=True,
+            )
 
+        t0 = time.perf_counter()
         gradient_fn = self._create_gradient_fn(batch)
         self._worker_pool.set_gradient_fn(gradient_fn)
+        if debug:
+            print(
+                f"[DEBUG] Step {step_num}: gradient_fn created ({time.perf_counter() - t0:.2f}s)",
+                flush=True,
+            )
 
         collection_start = time.perf_counter()
+        if debug:
+            print(
+                f"[DEBUG] Step {step_num}: Starting proof collection (K={self.config.protocol.K})...",
+                flush=True,
+            )
         proofs = self._worker_pool.compute_proofs_parallel(
             tasks,
             first_k=self.config.protocol.K,
         )
         collection_time = time.perf_counter() - collection_start
+        if debug:
+            print(
+                f"[DEBUG] Step {step_num}: Proof collection done ({collection_time:.2f}s, {len(proofs)} proofs)",
+                flush=True,
+            )
 
         aggregation_start = time.perf_counter()
         for proof in proofs:
             self._coordinator.collect_proof(proof)
         gradient, agg_result = self._coordinator.aggregate()
         aggregation_time = time.perf_counter() - aggregation_start
+        if debug:
+            print(
+                f"[DEBUG] Step {step_num}: Aggregation done ({aggregation_time:.2f}s)", flush=True
+            )
 
         update_start = time.perf_counter()
         new_params = self._coordinator.update_parameters(gradient)

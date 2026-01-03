@@ -11,6 +11,7 @@ Usage:
 import argparse
 import os
 import sys
+import time
 from pathlib import Path
 
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -199,6 +200,8 @@ def run_training(
     print("-" * 60, flush=True)
 
     val_losses = []
+    step_timeout_seconds = 300
+    debug_mode = steps <= 20
 
     train_iter = iter(train_loader)
     for step in range(steps):
@@ -208,7 +211,15 @@ def run_training(
             train_iter = iter(train_loader)
             batch = next(train_iter)
 
-        metrics = trainer.train_step(batch)
+        step_start = time.time()
+        metrics = trainer.train_step(batch, debug=debug_mode)
+        step_elapsed = time.time() - step_start
+
+        if step_elapsed > step_timeout_seconds:
+            print(
+                f"[ERROR] Step {step + 1} exceeded {step_timeout_seconds}s. Aborting.", flush=True
+            )
+            break
 
         if (step + 1) % log_interval == 0:
             print(
