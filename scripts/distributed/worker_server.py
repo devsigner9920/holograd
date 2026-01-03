@@ -52,7 +52,7 @@ class TaskRequest(BaseModel):
 
 class TaskResponse(BaseModel):
     step: int
-    seed: int
+    seed: str
     scalar: float
     adc_projection: Optional[List[float]] = None
     time: float

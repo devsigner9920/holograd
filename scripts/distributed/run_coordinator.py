@@ -144,8 +144,12 @@ class WorkerManager:
             )
             if resp.status_code == 200:
                 return resp.json()
+            else:
+                print(
+                    f"  Task error on port {local_port}: HTTP {resp.status_code} - {resp.text[:200]}"
+                )
         except Exception as e:
-            print(f"  Task error on port {local_port}: {e}")
+            print(f"  Task exception on port {local_port}: {type(e).__name__}: {e}")
         return None
 
     def cleanup(self):
