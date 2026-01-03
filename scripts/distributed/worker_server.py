@@ -151,14 +151,22 @@ def update_params(req: UpdateParamsRequest):
 def update_codebook(req: CodebookRequest):
     global adc_codebook
 
+    U_array = np.array(req.U, dtype=np.float32)
+    logger.info(
+        f"[update_codebook] Received codebook: shape={U_array.shape}, expected=({req.dimension}, {req.rank})"
+    )
+
     adc_codebook = ADCCodebook(
         dimension=req.dimension,
         rank=req.rank,
         device=device,
     )
-    adc_codebook._U = np.array(req.U, dtype=np.float32)
+    adc_codebook._U = U_array
+    adc_codebook._is_warmed_up = True  # Mark as warmed up since we received learned codebook
 
-    return {"status": "codebook_updated"}
+    logger.info(f"[update_codebook] Codebook updated successfully")
+
+    return {"status": "codebook_updated", "shape": list(U_array.shape)}
 
 
 @app.post("/apply_gradient")

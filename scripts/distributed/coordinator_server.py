@@ -415,6 +415,44 @@ def run_training(config: TrainRequest):
             model.set_flat_params(new_params)
 
             if coordinator.codebook and coordinator.codebook.is_warmed_up and not codebook_synced:
+                # Sync learned codebook to all workers
+                with state_lock:
+                    state.phase = f"step_{step}_syncing_codebook"
+
+                logger.info(f"[Step {step}] ADC warmup complete! Syncing codebook to workers...")
+                codebook_U = coordinator.codebook.codebook  # rank x dimension matrix
+                logger.info(
+                    f"[Step {step}] Codebook shape: {codebook_U.shape}, size: {codebook_U.nbytes / 1024 / 1024:.1f}MB"
+                )
+
+                # Send codebook to each worker (dimension x rank matrix)
+                # Note: This is ~200MB for D=3.2M, rank=16. Will be slow but works.
+                codebook_list = codebook_U.tolist()
+                with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+
+                    def sync_codebook(worker_info):
+                        wid, url = worker_info
+                        try:
+                            resp = client.session.post(
+                                f"{url}/update_codebook",
+                                json={
+                                    "U": codebook_list,
+                                    "rank": coordinator.codebook.rank,
+                                    "dimension": coordinator.codebook.dimension,
+                                },
+                                timeout=120,
+                            )
+                            return resp.status_code == 200
+                        except Exception as e:
+                            logger.error(f"[Step {step}] Failed to sync codebook to {wid}: {e}")
+                            return False
+
+                    results = list(executor.map(sync_codebook, healthy_workers))
+                    sync_count = sum(results)
+                    logger.info(
+                        f"[Step {step}] Codebook synced to {sync_count}/{len(healthy_workers)} workers"
+                    )
+
                 codebook_synced = True
                 with state_lock:
                     state.codebook_synced = True
