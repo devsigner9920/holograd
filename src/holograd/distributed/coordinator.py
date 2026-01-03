@@ -35,6 +35,7 @@ class CoordinatorConfig:
     momentum_beta: float = 0.9
     momentum_warmup_steps: int = 10
     grad_norm_ema_alpha: float = 0.1
+    device: str = "cpu"
 
 
 class Coordinator:
@@ -58,6 +59,7 @@ class Coordinator:
                 alpha_min=config.adc_alpha_min,
                 use_power_iteration=config.adc_use_power_iteration,
                 power_iteration_steps=config.adc_power_iteration_steps,
+                device=config.device,
             )
 
         self._current_params: Optional[NDArray[np.float32]] = None

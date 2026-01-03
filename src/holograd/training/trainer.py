@@ -89,6 +89,7 @@ class HoloGradTrainer:
                 momentum_beta=config.momentum_centric.beta,
                 momentum_warmup_steps=config.momentum_centric.warmup_steps,
                 grad_norm_ema_alpha=config.momentum_centric.grad_norm_ema_alpha,
+                device=self.device or "cpu",
             )
         )
 

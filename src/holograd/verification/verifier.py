@@ -53,9 +53,6 @@ class Verifier:
         self._direction_gen = DirectionGenerator(dimension)
         self._adc_codebook: Optional[ADCCodebook] = None
 
-        if use_adc:
-            self._adc_codebook = ADCCodebook(dimension, rank=adc_rank)
-
         self._rng = np.random.default_rng()
         self._stats = VerificationStats()
 
