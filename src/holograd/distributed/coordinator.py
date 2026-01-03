@@ -160,24 +160,12 @@ class Coordinator:
     def _aggregate_random(
         self, proofs: List[Proof]
     ) -> Tuple[NDArray[np.float32], AggregationResult]:
-        import time
-
-        t0 = time.perf_counter()
-
         scalars = [p.scalar for p in proofs]
 
         adc_warmed_up = self._adc_codebook is not None and self._adc_codebook.is_warmed_up
         use_adc_for_reconstruction = self.config.use_adc and adc_warmed_up
 
-        adc_count = sum(1 for p in proofs if p.adc_projection is not None)
-        print(
-            f"[AGG] ADC proofs: {adc_count}/{len(proofs)}, use_adc={use_adc_for_reconstruction}",
-            flush=True,
-        )
-
-        t1 = time.perf_counter()
         directions = self._reconstruct_directions_batch(proofs, use_adc_for_reconstruction)
-        print(f"[AGG] Direction reconstruction: {time.perf_counter() - t1:.2f}s", flush=True)
 
         if use_adc_for_reconstruction and self._adc_codebook is not None:
             scale_factor = self._adc_codebook.get_scale_factor()
