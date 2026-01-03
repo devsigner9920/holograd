@@ -34,6 +34,8 @@ class InitRequest(BaseModel):
     n_head: Optional[int] = None
     n_embd: Optional[int] = None
     seed: int = 0
+    adc_rank: int = 16
+    codebook_seed: Optional[int] = None
 
 
 class UpdateParamsRequest(BaseModel):
@@ -44,6 +46,18 @@ class CodebookRequest(BaseModel):
     U: List[List[float]]
     rank: int
     dimension: int
+
+
+class GradientSyncRequest(BaseModel):
+    z_agg: List[float]
+    learning_rate: float
+
+
+class SeedGradientSyncRequest(BaseModel):
+    seeds: List[str]
+    scalars: List[float]
+    learning_rate: float
+    use_adc: bool = False
 
 
 class TaskRequest(BaseModel):
@@ -70,7 +84,7 @@ def health():
 
 @app.post("/init")
 def init_model(req: InitRequest):
-    global model, direction_gen
+    global model, direction_gen, adc_codebook
 
     if req.model_size == "custom" and req.n_layer and req.n_head and req.n_embd:
         model = SimpleGPT2(
@@ -92,11 +106,26 @@ def init_model(req: InitRequest):
 
     direction_gen = DirectionGenerator(model.num_parameters)
 
+    if req.codebook_seed is not None:
+        adc_codebook = ADCCodebook(
+            dimension=model.num_parameters,
+            rank=req.adc_rank,
+            device=device,
+        )
+        adc_codebook.reset(seed=req.codebook_seed)
+        print(
+            f"[Worker] ADC codebook initialized with seed={req.codebook_seed}, rank={req.adc_rank}"
+        )
+
     if req.params:
         params = np.array(req.params, dtype=np.float32)
         model.set_flat_params(params)
 
-    return {"status": "initialized", "num_parameters": model.num_parameters}
+    return {
+        "status": "initialized",
+        "num_parameters": model.num_parameters,
+        "adc_initialized": req.codebook_seed is not None,
+    }
 
 
 @app.post("/update_params")
@@ -122,6 +151,61 @@ def update_codebook(req: CodebookRequest):
     adc_codebook._U = np.array(req.U, dtype=np.float32)
 
     return {"status": "codebook_updated"}
+
+
+@app.post("/apply_gradient")
+def apply_gradient(req: GradientSyncRequest):
+    global model, adc_codebook
+
+    if model is None:
+        return {"error": "Model not initialized"}
+    if adc_codebook is None:
+        return {"error": "Codebook not initialized"}
+
+    z_agg = np.array(req.z_agg, dtype=np.float32)
+    gradient = adc_codebook._U.astype(np.float32) @ z_agg
+
+    current_params = model.get_flat_params()
+    new_params = (current_params - req.learning_rate * gradient).astype(np.float32)
+    model.set_flat_params(new_params)
+
+    return {"status": "gradient_applied"}
+
+
+@app.post("/apply_seed_gradient")
+def apply_seed_gradient(req: SeedGradientSyncRequest):
+    global model, direction_gen, adc_codebook
+
+    if model is None:
+        return {"error": "Model not initialized"}
+
+    K = len(req.seeds)
+    if K == 0:
+        return {"error": "No seeds provided"}
+
+    dimension = model.num_parameters
+
+    if req.use_adc and adc_codebook is not None:
+        scale_factor = float(adc_codebook.rank)
+    else:
+        scale_factor = float(dimension)
+
+    gradient = np.zeros(dimension, dtype=np.float32)
+    for seed_hex, scalar in zip(req.seeds, req.scalars):
+        seed_bytes = bytes.fromhex(seed_hex)
+        if req.use_adc and adc_codebook is not None:
+            result = adc_codebook.generate_direction(seed_bytes)
+        else:
+            result = direction_gen.generate(seed_bytes)
+        gradient += scalar * result.direction
+
+    gradient = gradient * scale_factor / K
+
+    current_params = model.get_flat_params()
+    new_params = (current_params - req.learning_rate * gradient).astype(np.float32)
+    model.set_flat_params(new_params)
+
+    return {"status": "seed_gradient_applied", "gradient_norm": float(np.linalg.norm(gradient))}
 
 
 @app.post("/compute", response_model=TaskResponse)

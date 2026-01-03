@@ -74,6 +74,8 @@ class WorkerManager:
         vocab_size: int,
         seq_length: int,
         seed: int = 0,
+        adc_rank: int = 16,
+        codebook_seed: Optional[int] = None,
     ) -> bool:
         try:
             resp = requests.post(
@@ -86,8 +88,10 @@ class WorkerManager:
                     "vocab_size": vocab_size,
                     "seq_length": seq_length,
                     "seed": seed,
+                    "adc_rank": adc_rank,
+                    "codebook_seed": codebook_seed,
                 },
-                timeout=30,
+                timeout=60,
             )
             return resp.status_code == 200
         except Exception as e:
@@ -112,6 +116,40 @@ class WorkerManager:
             resp = requests.post(
                 f"http://localhost:{local_port}/update_codebook",
                 json={"U": U, "rank": rank, "dimension": dimension},
+                timeout=30,
+            )
+            return resp.status_code == 200
+        except:
+            return False
+
+    def apply_gradient(self, local_port: int, z_agg: List[float], learning_rate: float) -> bool:
+        try:
+            resp = requests.post(
+                f"http://localhost:{local_port}/apply_gradient",
+                json={"z_agg": z_agg, "learning_rate": learning_rate},
+                timeout=10,
+            )
+            return resp.status_code == 200
+        except:
+            return False
+
+    def apply_seed_gradient(
+        self,
+        local_port: int,
+        seeds: List[str],
+        scalars: List[float],
+        learning_rate: float,
+        use_adc: bool = False,
+    ) -> bool:
+        try:
+            resp = requests.post(
+                f"http://localhost:{local_port}/apply_seed_gradient",
+                json={
+                    "seeds": seeds,
+                    "scalars": scalars,
+                    "learning_rate": learning_rate,
+                    "use_adc": use_adc,
+                },
                 timeout=30,
             )
             return resp.status_code == 200
@@ -208,6 +246,8 @@ def run_training(
 
     print(f"\n[4] Creating model...")
     model_seed = 42
+    codebook_seed = 12345
+    adc_rank = 16
     model = SimpleGPT2(
         size="custom",
         n_layer=n_layer,
@@ -219,11 +259,21 @@ def run_training(
     )
     print(f"  Parameters: {model.num_parameters:,}")
 
-    print(f"\n[5] Initializing {len(healthy_workers)} workers (seed={model_seed})...")
+    print(
+        f"\n[5] Initializing {len(healthy_workers)} workers (seed={model_seed}, codebook_seed={codebook_seed})..."
+    )
     initialized_workers = []
     for wid, info in healthy_workers:
         ok = manager.init_worker(
-            info["local_port"], n_layer, n_head, n_embd, vocab_size, seq_length, model_seed
+            info["local_port"],
+            n_layer,
+            n_head,
+            n_embd,
+            vocab_size,
+            seq_length,
+            model_seed,
+            adc_rank=adc_rank,
+            codebook_seed=codebook_seed,
         )
         if ok:
             initialized_workers.append((wid, info))
@@ -243,18 +293,14 @@ def run_training(
         dimension=model.num_parameters,
         num_workers=len(healthy_workers),
         proofs_per_step=K,
-        use_adc=True,
-        adc_rank=16,
+        use_adc=False,
         learning_rate=learning_rate,
         device="cpu",
     )
     coordinator = Coordinator(coord_config)
     coordinator.set_parameters(model.get_flat_params())
 
-    if coordinator.codebook is not None:
-        U = coordinator.codebook.codebook.tolist()
-        for wid, info in healthy_workers:
-            manager.update_worker_codebook(info["local_port"], U, 16, model.num_parameters)
+    print(f"  Coordinator ADC: {coordinator.config.use_adc}")
 
     print(f"\n[7] Starting training ({num_steps} steps)...")
     print("-" * 70)
@@ -314,12 +360,30 @@ def run_training(
             print(f"Step {step}: Only {len(proofs)} proofs, skipping")
             continue
 
-        gradient, _ = coordinator.aggregate()
+        gradient, agg_result = coordinator.aggregate()
         new_params = coordinator.update_parameters(gradient)
         model.set_flat_params(new_params)
 
-        for wid, info in healthy_workers:
-            manager.update_worker_params(info["local_port"], new_params.tolist())
+        seeds_hex = [p.seed.hex() for p in proofs]
+        scalars_list = [p.scalar for p in proofs]
+        sync_ok = 0
+        with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+            futures = [
+                executor.submit(
+                    manager.apply_seed_gradient,
+                    info["local_port"],
+                    seeds_hex,
+                    scalars_list,
+                    learning_rate,
+                    False,
+                )
+                for wid, info in healthy_workers
+            ]
+            for f in futures:
+                if f.result():
+                    sync_ok += 1
+        if step == 0:
+            print(f"  Gradient sync: {sync_ok}/{len(healthy_workers)} workers")
 
         loss_val = model.compute_loss(batch.input_ids, batch.labels)
         losses.append(loss_val)
