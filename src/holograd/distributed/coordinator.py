@@ -161,22 +161,11 @@ class Coordinator:
         self, proofs: List[Proof]
     ) -> Tuple[NDArray[np.float32], AggregationResult]:
         scalars = [p.scalar for p in proofs]
-        directions = []
 
         adc_warmed_up = self._adc_codebook is not None and self._adc_codebook.is_warmed_up
         use_adc_for_reconstruction = self.config.use_adc and adc_warmed_up
 
-        for proof in proofs:
-            if proof.adc_projection is not None and self._adc_codebook is not None:
-                direction = self._adc_codebook.reconstruct_direction(proof.adc_projection)
-            else:
-                if use_adc_for_reconstruction and self._adc_codebook is not None:
-                    result = self._adc_codebook.generate_direction(proof.seed)
-                else:
-                    result = self._direction_gen.generate(proof.seed)
-                direction = result.direction
-
-            directions.append(direction)
+        directions = self._reconstruct_directions_batch(proofs, use_adc_for_reconstruction)
 
         if use_adc_for_reconstruction and self._adc_codebook is not None:
             scale_factor = self._adc_codebook.get_scale_factor()
@@ -194,6 +183,38 @@ class Coordinator:
         self.state.total_proofs_trimmed += agg_result.proofs_trimmed
 
         return agg_result.gradient, agg_result
+
+    def _reconstruct_directions_batch(
+        self,
+        proofs: List[Proof],
+        use_adc: bool,
+    ) -> List[NDArray[np.float32]]:
+        directions_map: dict[int, NDArray[np.float32]] = {}
+
+        adc_indices: List[int] = []
+        adc_projections: List[NDArray[np.float32]] = []
+
+        for i, p in enumerate(proofs):
+            if p.adc_projection is not None:
+                adc_indices.append(i)
+                adc_projections.append(p.adc_projection)
+
+        if adc_projections and self._adc_codebook is not None:
+            z_batch = np.stack(adc_projections, axis=1)
+            batch_result = self._adc_codebook.reconstruct_directions_batch(z_batch)
+            for batch_idx, proof_idx in enumerate(adc_indices):
+                directions_map[proof_idx] = batch_result[:, batch_idx]
+
+        for i, p in enumerate(proofs):
+            if i in directions_map:
+                continue
+            if use_adc and self._adc_codebook is not None:
+                result = self._adc_codebook.generate_direction(p.seed)
+            else:
+                result = self._direction_gen.generate(p.seed)
+            directions_map[i] = result.direction
+
+        return [directions_map[i] for i in range(len(proofs))]
 
     def _aggregate_momentum(
         self, proofs: List[Proof]

@@ -266,6 +266,49 @@ class ADCCodebook:
             direction = direction / norm
         return direction
 
+    def reconstruct_directions_batch(
+        self,
+        z_batch: NDArray[np.float32],
+        use_gpu: bool = True,
+    ) -> NDArray[np.float32]:
+        """Batch reconstruct multiple directions efficiently.
+
+        Args:
+            z_batch: Shape (rank, K) - K direction coefficients stacked as columns
+            use_gpu: Whether to use GPU for computation (if available)
+
+        Returns:
+            Shape (dimension, K) - K normalized directions as columns
+        """
+        if use_gpu and TORCH_AVAILABLE and self.device != "cpu":
+            return self._reconstruct_batch_torch(z_batch)
+        return self._reconstruct_batch_numpy(z_batch)
+
+    def _reconstruct_batch_numpy(self, z_batch: NDArray[np.float32]) -> NDArray[np.float32]:
+        directions = self._U.astype(np.float32) @ z_batch.astype(np.float32)
+        norms = np.linalg.norm(directions, axis=0, keepdims=True)
+        norms = np.maximum(norms, 1e-10)
+        return directions / norms
+
+    def _reconstruct_batch_torch(self, z_batch: NDArray[np.float32]) -> NDArray[np.float32]:
+        device = self.device
+        U_t = torch.from_numpy(self._U.astype(np.float32)).to(device)
+        Z_t = torch.from_numpy(z_batch.astype(np.float32)).to(device)
+
+        directions_t = U_t @ Z_t
+
+        norms = torch.linalg.norm(directions_t, dim=0, keepdim=True)
+        norms = torch.clamp(norms, min=1e-10)
+        directions_t = directions_t / norms
+
+        result = directions_t.cpu().numpy()
+
+        del U_t, Z_t, directions_t
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+
+        return result
+
     def _update_alpha(self) -> None:
         if self.alpha_decay < 1.0:
             self._current_alpha = max(
