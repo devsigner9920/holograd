@@ -277,7 +277,7 @@ def run_training(num_steps: int = 100, K: int = 8, skip_server_start: bool = Fal
                     proof = Proof(
                         step=result["step"],
                         worker_id=int(futures[future]),
-                        seed=result["seed"],
+                        seed=bytes.fromhex(result["seed"]),
                         scalar=result["scalar"],
                         timestamp=time.time(),
                         adc_projection=np.array(result["adc_projection"])
