@@ -252,19 +252,19 @@ class ADCCodebook:
 
     def generate_direction(self, seed: bytes) -> DirectionResult:
         rng = seed_to_rng(seed)
-        z = rng.standard_normal(self.rank).astype(self.dtype)
-        direction = self._U @ z
+        z = rng.standard_normal(self.rank).astype(np.float32)
+        direction = self._U.astype(np.float32) @ z
         norm = np.linalg.norm(direction)
         if norm > 1e-10:
             direction = direction / norm
-        return DirectionResult(direction=direction, z_projection=z)
+        return DirectionResult(direction=direction.astype(np.float32), z_projection=z)
 
     def reconstruct_direction(self, z: NDArray[np.float32]) -> NDArray[np.float32]:
-        direction = self._U @ z
+        direction = self._U.astype(np.float32) @ z.astype(np.float32)
         norm = np.linalg.norm(direction)
         if norm > 1e-10:
             direction = direction / norm
-        return direction
+        return direction.astype(np.float32)
 
     def reconstruct_directions_batch(
         self,
