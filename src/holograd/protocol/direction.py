@@ -291,23 +291,29 @@ class ADCCodebook:
         return directions / norms
 
     def _reconstruct_batch_torch(self, z_batch: NDArray[np.float32]) -> NDArray[np.float32]:
+        K = z_batch.shape[1]
+        chunk_size = 4
         device = self.device
         U_t = torch.from_numpy(self._U.astype(np.float32)).to(device)
-        Z_t = torch.from_numpy(z_batch.astype(np.float32)).to(device)
 
-        directions_t = U_t @ Z_t
+        result_chunks = []
+        for i in range(0, K, chunk_size):
+            end_idx = min(i + chunk_size, K)
+            Z_chunk = torch.from_numpy(z_batch[:, i:end_idx].astype(np.float32)).to(device)
 
-        norms = torch.linalg.norm(directions_t, dim=0, keepdim=True)
-        norms = torch.clamp(norms, min=1e-10)
-        directions_t = directions_t / norms
+            dirs_chunk = U_t @ Z_chunk
+            norms = torch.linalg.norm(dirs_chunk, dim=0, keepdim=True)
+            norms = torch.clamp(norms, min=1e-10)
+            dirs_chunk = dirs_chunk / norms
 
-        result = directions_t.cpu().numpy()
-
-        del U_t, Z_t, directions_t
-        if torch.cuda.is_available():
+            result_chunks.append(dirs_chunk.cpu().numpy())
+            del Z_chunk, dirs_chunk
             torch.cuda.empty_cache()
 
-        return result
+        del U_t
+        torch.cuda.empty_cache()
+
+        return np.concatenate(result_chunks, axis=1)
 
     def _update_alpha(self) -> None:
         if self.alpha_decay < 1.0:
