@@ -39,12 +39,17 @@ class WorkerManager:
         self.servers: Dict[str, subprocess.Popen] = {}
 
     def start_worker_server(self, worker_id: str, info: dict) -> bool:
+        # Kill any existing server first, then start new one with proper backgrounding
         cmd = (
-            f"ssh -o StrictHostKeyChecking=no -p {info['port']} root@{info['host']} "
-            f"'cd /root/holograd && nohup python3 scripts/distributed/worker_server.py --port 8000 > /tmp/worker.log 2>&1 &'"
+            f"ssh -o StrictHostKeyChecking=no -o ConnectTimeout=15 -p {info['port']} root@{info['host']} "
+            f"\"bash -c 'pkill -f worker_server.py 2>/dev/null; sleep 1; "
+            f"cd /root/holograd && nohup python3 scripts/distributed/worker_server.py --port 8000 > /tmp/worker.log 2>&1 & sleep 1'\""
         )
-        result = subprocess.run(cmd, shell=True, capture_output=True, timeout=30)
-        return result.returncode == 0
+        try:
+            result = subprocess.run(cmd, shell=True, capture_output=True, timeout=45)
+            return result.returncode == 0
+        except subprocess.TimeoutExpired:
+            return False
 
     def start_tunnel(self, worker_id: str, info: dict) -> bool:
         cmd = [
@@ -119,17 +124,18 @@ class WorkerManager:
         self,
         local_port: int,
         step: int,
-        seed: int,
+        seed: bytes,
         use_adc: bool,
         input_ids: List[List[int]],
         labels: List[List[int]],
     ) -> Optional[dict]:
         try:
+            seed_hex = seed.hex() if isinstance(seed, bytes) else str(seed)
             resp = requests.post(
                 f"http://localhost:{local_port}/compute",
                 json={
                     "step": step,
-                    "seed": seed,
+                    "seed": seed_hex,
                     "use_adc": use_adc,
                     "input_ids": input_ids,
                     "labels": labels,
@@ -149,19 +155,22 @@ class WorkerManager:
             proc.terminate()
 
 
-def run_training(num_steps: int = 100, K: int = 8):
+def run_training(num_steps: int = 100, K: int = 8, skip_server_start: bool = False):
     manager = WorkerManager()
 
     print("=" * 60)
     print("HoloGrad FastAPI-Based Distributed Training")
     print("=" * 60)
 
-    print("\n[1] Starting worker servers...")
-    for wid, info in WORKERS.items():
-        ok = manager.start_worker_server(wid, info)
-        print(f"  {wid}: {'started' if ok else 'failed'}")
-
-    time.sleep(5)
+    if not skip_server_start:
+        print("\n[1] Starting worker servers...")
+        for wid, info in WORKERS.items():
+            ok = manager.start_worker_server(wid, info)
+            print(f"  {wid}: {'started' if ok else 'failed'}")
+        time.sleep(5)
+    else:
+        print("\n[1] Skipping server start (--skip-server-start)")
+        time.sleep(2)
 
     print("\n[2] Creating SSH tunnels...")
     active_workers = []
@@ -304,6 +313,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--steps", type=int, default=50)
     parser.add_argument("--K", type=int, default=6)
+    parser.add_argument("--skip-server-start", action="store_true")
     args = parser.parse_args()
 
-    run_training(num_steps=args.steps, K=args.K)
+    run_training(num_steps=args.steps, K=args.K, skip_server_start=args.skip_server_start)

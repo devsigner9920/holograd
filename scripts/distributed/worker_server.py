@@ -44,7 +44,7 @@ class CodebookRequest(BaseModel):
 
 class TaskRequest(BaseModel):
     step: int
-    seed: int
+    seed: str
     use_adc: bool
     input_ids: List[List[int]]
     labels: List[List[int]]
@@ -113,14 +113,16 @@ def compute_jvp(req: TaskRequest):
     input_ids = np.array(req.input_ids, dtype=np.int64)
     labels = np.array(req.labels, dtype=np.int64)
 
+    seed_bytes = bytes.fromhex(req.seed)
+
     adc_projection = None
     if req.use_adc and adc_codebook is not None:
-        result = adc_codebook.generate_direction(req.seed)
+        result = adc_codebook.generate_direction(seed_bytes)
         direction = result.direction
         if result.z_projection is not None:
             adc_projection = result.z_projection.tolist()
     else:
-        result = direction_gen.generate(req.seed)
+        result = direction_gen.generate(seed_bytes)
         direction = result.direction
 
     input_ids_t = torch.tensor(input_ids, dtype=torch.long, device=device)
