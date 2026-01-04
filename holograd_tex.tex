@@ -374,8 +374,8 @@ In contrast to random or learned directions, the training momentum:
 \]
 accumulates gradient information over time. Even if individual gradients are nearly orthogonal, the momentum direction correlates with the \emph{average} gradient direction. Empirically:
 \begin{itemize}[leftmargin=*]
-  \item Cosine similarity $\ip{\g_t}{\bm{m}_t/\norm{\bm{m}_t}} \approx 0.18$
-  \item This is $\approx 180\times$ better alignment than random directions
+  \item Cosine similarity $\ip{\g_t}{\bm{m}_t/\norm{\bm{m}_t}} \approx 0.05$
+  \item This is $\approx 8\times$ better alignment than random directions
   \item Communication: 1 scalar vs $K=128$ scalars
 \end{itemize}
 
@@ -484,18 +484,18 @@ so more workers reduce variance and ensure descent.
 \end{corollary}
 
 \paragraph{Interpretation.}
-The descent guarantee depends on $\alpha_t^2 = \ip{\g}{\hat{\bm{m}}_t}^2$, the squared correlation between the true gradient and momentum. This quantity is \emph{large} when momentum tracks the gradient direction---which occurs naturally since momentum is an exponential moving average of past gradients. Empirically, we observe $|\alpha_t| / \norm{\g} \approx 0.18$, yielding meaningful descent despite projecting onto a single direction.
+The descent guarantee depends on $\alpha_t^2 = \ip{\g}{\hat{\bm{m}}_t}^2$, the squared correlation between the true gradient and momentum. This quantity is \emph{large} when momentum tracks the gradient direction---which occurs naturally since momentum is an exponential moving average of past gradients. Empirically, we observe $|\alpha_t| / \norm{\g} \approx 0.05$, yielding meaningful descent despite projecting onto a single direction.
 
 \paragraph{Comparison to random projections.}
 For random unit directions $\vdir_j$, the expected squared alignment is $\E[\ip{\g}{\vdir_j}^2] = \norm{\g}^2 / D$. With $K$ directions:
 \[
 \text{Random: } \alpha_{\text{rand}}^2 \approx K \cdot \norm{\g}^2 / D.
 \]
-For momentum, $\alpha_t^2 \approx 0.03 \norm{\g}^2$ (based on empirical cosine similarity of 0.18). The momentum approach is more efficient than random projections when:
+For momentum, $\alpha_t^2 \approx 0.0025 \norm{\g}^2$ (based on empirical cosine similarity of 0.05). The momentum approach is more efficient than random projections when:
 \[
-0.03 \norm{\g}^2 > K \cdot \norm{\g}^2 / D \quad \Rightarrow \quad K < 0.03 D.
+0.0025 \norm{\g}^2 > K \cdot \norm{\g}^2 / D \quad \Rightarrow \quad K < 0.0025 D.
 \]
-For GPT-2-small ($D \approx 124$M), this means momentum outperforms random projections for any $K < 3.7$M---far beyond practical $K$ values.
+For GPT-2-small ($D \approx 124$M), this means momentum outperforms random projections for any $K < 310$K---far beyond practical $K$ values.
 
 \subsection{Trade-offs}
 

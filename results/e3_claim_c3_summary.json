@@ -1,0 +1,69 @@
+{
+  "experiment": "E3",
+  "claim": "C3 - Momentum is 180x more efficient than random directions",
+  "status": "NOT_REPRODUCED",
+  "timestamp": "2026-01-04T16:49:22Z",
+  "paper_claim": {
+    "momentum_alignment": 0.18,
+    "random_alignment": 0.001,
+    "efficiency_ratio": 180
+  },
+  "experimental_results": {
+    "model": "tiny (D=16,704)",
+    "num_steps": 1000,
+    "warmup": 50,
+    "methods": {
+      "pure_sgd": {
+        "initial_loss": 4.6173,
+        "final_loss": 4.5490,
+        "reduction_pct": 1.5,
+        "mean_cosine": 1.0
+      },
+      "random_holograd_k64": {
+        "initial_loss": 4.6105,
+        "final_loss": 4.5970,
+        "reduction_pct": 0.3,
+        "mean_cosine": 0.0063
+      },
+      "momentum_holograd": {
+        "initial_loss": 4.5998,
+        "final_loss": 4.5798,
+        "reduction_pct": 0.4,
+        "mean_cosine": 0.0533
+      },
+      "momentum_holograd_v2": {
+        "initial_loss": 4.6176,
+        "final_loss": 4.5920,
+        "reduction_pct": 0.6,
+        "mean_cosine": 0.0495
+      },
+      "signsgd_style": {
+        "initial_loss": 4.6120,
+        "final_loss": 4.6070,
+        "reduction_pct": 0.1,
+        "mean_cosine": 0.0223
+      }
+    }
+  },
+  "analysis": {
+    "actual_momentum_alignment": 0.053,
+    "actual_random_alignment": 0.0063,
+    "actual_efficiency_ratio": 8.4,
+    "momentum_vs_sgd_efficiency": "27% (0.4%/1.5%)"
+  },
+  "action_taken": {
+    "paper_updates": [
+      "Line 377: cosine 0.18 -> 0.05",
+      "Line 378: 180x -> 8x",
+      "Line 487: 0.18 -> 0.05",
+      "Line 494: 0.03 -> 0.0025, 0.18 -> 0.05",
+      "Line 496: 0.03 -> 0.0025",
+      "Line 498: 3.7M -> 310K"
+    ]
+  },
+  "notes": [
+    "The 180x claim was not reproduced; actual ratio is ~8x",
+    "Momentum still outperforms random for practical K values",
+    "C4 claim (30-40% of SGD) is partially supported (~27%)"
+  ]
+}
