@@ -246,6 +246,9 @@ def main():
     parser.add_argument(
         "--full", action="store_true", help="Full E1 experiment with GPT2-like 50M model"
     )
+    parser.add_argument(
+        "--gpt2-small", action="store_true", help="GPT-2-small 124M (paper setting)"
+    )
 
     parser.add_argument("--n-layer", type=int, default=2, help="Number of transformer layers")
     parser.add_argument("--n-head", type=int, default=2, help="Number of attention heads")
@@ -268,6 +271,11 @@ def main():
         num_gradients = 20
         seq_length = 32
         batch_size = 4
+    elif args.gpt2_small:
+        n_layer, n_head, n_embd = 12, 12, 768
+        num_gradients = 50
+        seq_length = 128
+        batch_size = 2
     elif args.full:
         n_layer, n_head, n_embd = 6, 8, 512
         num_gradients = 50

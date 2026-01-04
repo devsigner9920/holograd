@@ -28,9 +28,14 @@ from datetime import datetime
 
 EXPERIMENTS = {
     "E1": {
-        "name": "Gradient Variability",
+        "name": "Gradient Variability (50M)",
         "script": "benchmarks/analyze_gradient_variation.py",
         "default_args": ["--full", "--save"],
+    },
+    "E1-GPT2": {
+        "name": "Gradient Variability (GPT2-small 124M)",
+        "script": "benchmarks/analyze_gradient_variation.py",
+        "default_args": ["--gpt2-small", "--save"],
     },
     "E3": {
         "name": "Momentum vs Random",
