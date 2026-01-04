@@ -55,9 +55,12 @@ def main():
     print(f"\nCollecting {num_gradients} gradients (seq_length={seq_length})...")
     gradients = []
 
-    texts = [t for t in dataset["text"] if len(t) > 100][: num_gradients * 2]
+    texts = list(set([t for t in dataset["text"] if len(t) > 300]))
+    np.random.seed(42)
+    np.random.shuffle(texts)
+    texts = texts[:num_gradients]
 
-    for i, text in enumerate(texts[:num_gradients]):
+    for i, text in enumerate(texts):
         tokens = tokenizer(
             text, return_tensors="pt", max_length=seq_length, truncation=True, padding="max_length"
         )
