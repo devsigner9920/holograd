@@ -1,0 +1,39 @@
+{
+  "claim": "C2: NN gradients are near-orthogonal (cosine ~ 0.07)",
+  "paper_setting": {
+    "model": "GPT-2-small (124M params)",
+    "method": "50 independent mini-batches",
+    "expected_cosine": 0.07
+  },
+  "our_experiments": [
+    {
+      "seq_length": 128,
+      "batch_size": 2,
+      "mean_cosine": 0.3136,
+      "ratio_to_paper": 4.48
+    },
+    {
+      "seq_length": 256,
+      "batch_size": 1,
+      "mean_cosine": 0.2817,
+      "ratio_to_paper": 4.02
+    },
+    {
+      "seq_length": 512,
+      "batch_size": 1,
+      "mean_cosine": 0.3817,
+      "ratio_to_paper": 5.45
+    }
+  ],
+  "conclusion": {
+    "status": "NOT_REPRODUCED",
+    "finding": "Paper claim C2 could not be reproduced. Our measured cosine similarities (0.28-0.38) are 4-5x higher than paper claim (0.07).",
+    "possible_reasons": [
+      "Different model initialization",
+      "Different data preprocessing",
+      "Different sampling strategy for mini-batches",
+      "Paper claim may be incorrect or context-specific"
+    ]
+  },
+  "timestamp": "2026-01-04"
+}
