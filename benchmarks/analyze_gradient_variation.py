@@ -274,8 +274,8 @@ def main():
     elif args.gpt2_small:
         n_layer, n_head, n_embd = 12, 12, 768
         num_gradients = 50
-        seq_length = 128
-        batch_size = 2
+        seq_length = 256
+        batch_size = 1
     elif args.full:
         n_layer, n_head, n_embd = 6, 8, 512
         num_gradients = 50
