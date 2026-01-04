@@ -1,14 +1,28 @@
 #!/usr/bin/env python3
+"""
+HoloGrad Coordinator Server - Production-ready with stability improvements.
+
+Features:
+- Dynamic worker discovery from Vast.ai
+- Automatic retry with exponential backoff
+- Checkpoint saving and resumption
+- Graceful degradation on worker failures
+- Detailed progress monitoring
+"""
+
 import asyncio
 import sys
 import threading
 import time
+import json
 import logging
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Optional, Dict
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import List, Optional, Dict, Tuple
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FuturesTimeoutError
 from collections import deque
+import subprocess
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent / "src"))
 
@@ -22,6 +36,8 @@ logger = logging.getLogger(__name__)
 
 import numpy as np
 import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 
@@ -32,17 +48,72 @@ from holograd.core.types import Proof
 
 app = FastAPI(title="HoloGrad Coordinator")
 
-WORKERS = {
-    "29473291": "http://113.201.14.131:43698",
-    "29473292": "http://1.208.108.242:30473",
-    "29473293": "http://1.208.108.242:63837",
-    "29473294": "http://1.208.108.242:61803",
-    "29473295": "http://70.68.84.2:46439",
-    "29473296": "http://14.187.66.74:10181",
-    "29473308": "http://142.170.89.112:23501",
-    "29473314": "http://142.170.89.112:32222",
-    "29473316": "http://171.101.231.208:50563",
-}
+# Will be populated dynamically
+WORKERS: Dict[str, str] = {}
+
+
+def discover_workers() -> Dict[str, str]:
+    """Discover workers from Vast.ai instances."""
+    workers = {}
+    try:
+        result = subprocess.run(
+            ["vastai", "show", "instances", "--raw"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        if result.returncode == 0:
+            instances = json.loads(result.stdout)
+            for inst in instances:
+                if inst.get("actual_status") == "running":
+                    instance_id = str(inst["id"])
+                    # Get direct HTTP access info
+                    public_ip = inst.get("public_ipaddr")
+                    ports = inst.get("ports", {})
+                    # Find the mapped port for 8000
+                    for port_mapping in ports.values():
+                        if port_mapping.get("PrivatePort") == 8000:
+                            host_port = port_mapping.get("PublicPort")
+                            if public_ip and host_port:
+                                workers[instance_id] = f"http://{public_ip}:{host_port}"
+                                break
+                    # Fallback: try direct_port_end if available
+                    if instance_id not in workers:
+                        direct_port = inst.get("direct_port_end")
+                        if public_ip and direct_port:
+                            workers[instance_id] = f"http://{public_ip}:{direct_port}"
+            logger.info(f"Discovered {len(workers)} workers from Vast.ai")
+    except Exception as e:
+        logger.warning(f"Failed to discover workers: {e}")
+    return workers
+
+
+def load_workers_from_env() -> Dict[str, str]:
+    """Load workers from environment variable or file."""
+    workers = {}
+
+    # Try environment variable first
+    workers_json = os.environ.get("HOLOGRAD_WORKERS")
+    if workers_json:
+        try:
+            workers = json.loads(workers_json)
+            logger.info(f"Loaded {len(workers)} workers from environment")
+            return workers
+        except:
+            pass
+
+    # Try workers.json file
+    workers_file = Path(__file__).parent / "workers.json"
+    if workers_file.exists():
+        try:
+            with open(workers_file) as f:
+                workers = json.load(f)
+            logger.info(f"Loaded {len(workers)} workers from {workers_file}")
+            return workers
+        except:
+            pass
+
+    return workers
 
 
 @dataclass
@@ -55,7 +126,9 @@ class WorkerStatus:
     last_task_time: float = 0.0
     last_scalar: float = 0.0
     errors: int = 0
+    consecutive_errors: int = 0
     busy: bool = False
+    disabled: bool = False
 
 
 @dataclass
@@ -103,34 +176,58 @@ class TrainingState:
     K: int = 0
     learning_rate: float = 0.0
 
+    # Checkpoint info
+    checkpoint_dir: str = ""
+    last_checkpoint_step: int = 0
+
 
 state = TrainingState()
 state_lock = threading.Lock()
 
+# Checkpoint directory
+CHECKPOINT_DIR = Path(__file__).parent / "checkpoints"
+
 
 class TrainRequest(BaseModel):
     steps: int = 100
-    K: int = 8
-    n_layer: int = 1
-    n_head: int = 2
-    n_embd: int = 64
-    seq_length: int = 32
-    batch_size: int = 4
-    lr: float = 0.1
-    max_samples: int = 5000
-    use_adc: bool = True  # Set to False to disable ADC and use random directions only
+    K: int = 64
+    n_layer: int = 6
+    n_head: int = 8
+    n_embd: int = 256
+    seq_length: int = 64
+    batch_size: int = 8
+    lr: float = 0.01
+    max_samples: int = 10000
+    use_adc: bool = True
+    adc_rank: int = 32
+    checkpoint_every: int = 50
+    resume_from: Optional[str] = None
 
 
 class WorkerClient:
-    def __init__(self):
+    def __init__(self, timeout: int = 30, retries: int = 3):
         self.session = requests.Session()
 
-    def check_health(self, url: str) -> bool:
+        # Configure retry strategy
+        retry_strategy = Retry(
+            total=retries,
+            backoff_factor=1,
+            status_forcelist=[500, 502, 503, 504],
+        )
+        adapter = HTTPAdapter(max_retries=retry_strategy)
+        self.session.mount("http://", adapter)
+        self.session.mount("https://", adapter)
+        self.timeout = timeout
+
+    def check_health(self, url: str) -> Tuple[bool, Optional[dict]]:
         try:
-            resp = self.session.get(f"{url}/health", timeout=5)
-            return resp.status_code == 200
-        except:
-            return False
+            resp = self.session.get(f"{url}/health", timeout=10)
+            if resp.status_code == 200:
+                return True, resp.json()
+            return False, None
+        except Exception as e:
+            logger.debug(f"Health check failed for {url}: {e}")
+            return False, None
 
     def init_worker(
         self,
@@ -143,7 +240,7 @@ class WorkerClient:
         seed: int,
         adc_rank: int,
         codebook_seed: int,
-    ) -> bool:
+    ) -> Tuple[bool, Optional[dict]]:
         try:
             resp = self.session.post(
                 f"{url}/init",
@@ -158,11 +255,14 @@ class WorkerClient:
                     "adc_rank": adc_rank,
                     "codebook_seed": codebook_seed,
                 },
-                timeout=60,
+                timeout=120,  # Model init can take time
             )
-            return resp.status_code == 200
-        except:
-            return False
+            if resp.status_code == 200:
+                return True, resp.json()
+            return False, None
+        except Exception as e:
+            logger.error(f"Init failed for {url}: {e}")
+            return False, None
 
     def apply_seed_gradient(
         self, url: str, seeds: List[str], scalars: List[float], lr: float, use_adc: bool
@@ -171,10 +271,11 @@ class WorkerClient:
             resp = self.session.post(
                 f"{url}/apply_seed_gradient",
                 json={"seeds": seeds, "scalars": scalars, "learning_rate": lr, "use_adc": use_adc},
-                timeout=30,
+                timeout=60,
             )
             return resp.status_code == 200
-        except:
+        except Exception as e:
+            logger.warning(f"Apply gradient failed for {url}: {e}")
             return False
 
     def compute_task(
@@ -186,6 +287,7 @@ class WorkerClient:
         use_adc: bool,
         input_ids: List,
         labels: List,
+        timeout: int = 180,
     ) -> Optional[dict]:
         try:
             seed_hex = seed.hex() if isinstance(seed, bytes) else str(seed)
@@ -199,7 +301,7 @@ class WorkerClient:
                     "input_ids": input_ids,
                     "labels": labels,
                 },
-                timeout=120,
+                timeout=timeout,
             )
             elapsed = time.time() - start
             if resp.status_code == 200:
@@ -207,13 +309,84 @@ class WorkerClient:
                 result["worker_time"] = elapsed
                 result["worker_id"] = worker_id
                 return result
-        except:
-            pass
+            else:
+                logger.warning(f"Compute failed for {worker_id}: status={resp.status_code}")
+        except Exception as e:
+            logger.warning(f"Compute failed for {worker_id}: {e}")
         return None
+
+    def sync_codebook(
+        self,
+        url: str,
+        codebook_b64: str,
+        rank: int,
+        dimension: int,
+        scale: float,
+        timeout: int = 120,
+    ) -> bool:
+        try:
+            resp = self.session.post(
+                f"{url}/update_codebook_b64",
+                json={
+                    "U_b64": codebook_b64,
+                    "rank": rank,
+                    "dimension": dimension,
+                    "dtype": "int8",
+                    "scale": scale,
+                },
+                timeout=timeout,
+            )
+            return resp.status_code == 200
+        except Exception as e:
+            logger.warning(f"Codebook sync failed for {url}: {e}")
+            return False
+
+
+def save_checkpoint(
+    step: int,
+    model: SimpleGPT2,
+    coordinator: Coordinator,
+    losses: List[float],
+    config: TrainRequest,
+) -> str:
+    """Save training checkpoint."""
+    CHECKPOINT_DIR.mkdir(parents=True, exist_ok=True)
+    checkpoint_path = CHECKPOINT_DIR / f"checkpoint_step_{step}.npz"
+
+    np.savez(
+        checkpoint_path,
+        step=step,
+        params=model.get_flat_params(),
+        losses=np.array(losses),
+        config=json.dumps(config.model_dump()),
+        codebook=coordinator.codebook.codebook if coordinator.codebook else None,
+        codebook_warmed_up=coordinator.codebook.is_warmed_up if coordinator.codebook else False,
+    )
+
+    logger.info(f"Saved checkpoint to {checkpoint_path}")
+    return str(checkpoint_path)
+
+
+def load_checkpoint(path: str) -> dict:
+    """Load training checkpoint."""
+    data = np.load(path, allow_pickle=True)
+    return {
+        "step": int(data["step"]),
+        "params": data["params"],
+        "losses": data["losses"].tolist(),
+        "config": json.loads(str(data["config"])),
+        "codebook": data["codebook"] if data["codebook"] is not None else None,
+        "codebook_warmed_up": bool(data["codebook_warmed_up"]),
+    }
+
+
+def get_healthy_workers(workers: Dict[str, WorkerStatus]) -> List[Tuple[str, str]]:
+    """Get list of healthy, non-disabled workers."""
+    return [(wid, ws.url) for wid, ws in workers.items() if ws.healthy and not ws.disabled]
 
 
 def run_training(config: TrainRequest):
-    global state
+    global state, WORKERS
     client = WorkerClient()
 
     with state_lock:
@@ -225,26 +398,49 @@ def run_training(config: TrainRequest):
         state.K = config.K
         state.learning_rate = config.lr
         state.adc_warmup_needed = 20
+        state.checkpoint_dir = str(CHECKPOINT_DIR)
 
     try:
+        # Discover workers
         with state_lock:
-            state.phase = "checking_workers"
+            state.phase = "discovering_workers"
 
-        healthy_workers = []
-        for wid, url in WORKERS.items():
-            ws = WorkerStatus(id=wid, url=url)
-            ws.healthy = client.check_health(url)
-            if ws.healthy:
-                healthy_workers.append((wid, url))
-            with state_lock:
-                state.workers[wid] = ws
+        WORKERS = discover_workers()
+        if not WORKERS:
+            WORKERS = load_workers_from_env()
 
-        if len(healthy_workers) < 3:
+        if not WORKERS:
             with state_lock:
-                state.error = f"Not enough workers: {len(healthy_workers)}/3 minimum"
+                state.error = "No workers found. Set HOLOGRAD_WORKERS env or create workers.json"
                 state.running = False
             return
 
+        # Health check workers
+        with state_lock:
+            state.phase = "checking_workers"
+
+        for wid, url in WORKERS.items():
+            ws = WorkerStatus(id=wid, url=url)
+            healthy, info = client.check_health(url)
+            ws.healthy = healthy
+            if info:
+                logger.info(
+                    f"Worker {wid}: healthy, device={info.get('device')}, memory={info.get('memory')}"
+                )
+            with state_lock:
+                state.workers[wid] = ws
+
+        healthy_workers = get_healthy_workers(state.workers)
+
+        if len(healthy_workers) < 2:
+            with state_lock:
+                state.error = f"Not enough workers: {len(healthy_workers)}/2 minimum"
+                state.running = False
+            return
+
+        logger.info(f"Found {len(healthy_workers)} healthy workers")
+
+        # Load data
         with state_lock:
             state.phase = "loading_data"
 
@@ -256,10 +452,11 @@ def run_training(config: TrainRequest):
             max_val_samples=100,
         )
 
+        # Create model
         with state_lock:
             state.phase = "creating_model"
 
-        model_seed, codebook_seed, adc_rank = 42, 12345, 16
+        model_seed, codebook_seed = 42, 12345
         model = SimpleGPT2(
             size="custom",
             n_layer=config.n_layer,
@@ -273,24 +470,69 @@ def run_training(config: TrainRequest):
         with state_lock:
             state.model_params = model.num_parameters
 
+        logger.info(f"Model created: {model.num_parameters:,} parameters")
+
+        # Resume from checkpoint if specified
+        start_step = 0
+        codebook_synced = False
+
+        if config.resume_from:
+            try:
+                checkpoint = load_checkpoint(config.resume_from)
+                model.set_flat_params(checkpoint["params"])
+                start_step = checkpoint["step"]
+                state.losses = checkpoint["losses"]
+                codebook_synced = checkpoint["codebook_warmed_up"]
+                logger.info(f"Resumed from checkpoint: step={start_step}")
+            except Exception as e:
+                logger.error(f"Failed to load checkpoint: {e}")
+
+        # Initialize workers
         with state_lock:
             state.phase = "initializing_workers"
 
-        for wid, url in healthy_workers:
-            ok = client.init_worker(
-                url,
-                config.n_layer,
-                config.n_head,
-                config.n_embd,
-                vocab_size,
-                config.seq_length,
-                model_seed,
-                adc_rank,
-                codebook_seed,
-            )
-            with state_lock:
-                state.workers[wid].initialized = ok
+        init_results = []
+        with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
+            futures = {}
+            for wid, url in healthy_workers:
+                future = executor.submit(
+                    client.init_worker,
+                    url,
+                    config.n_layer,
+                    config.n_head,
+                    config.n_embd,
+                    vocab_size,
+                    config.seq_length,
+                    model_seed,
+                    config.adc_rank,
+                    codebook_seed,
+                )
+                futures[future] = wid
 
+            for future in as_completed(futures, timeout=180):
+                wid = futures[future]
+                try:
+                    ok, info = future.result()
+                    with state_lock:
+                        state.workers[wid].initialized = ok
+                    if ok:
+                        init_results.append(wid)
+                        logger.info(f"Worker {wid} initialized: {info}")
+                    else:
+                        logger.warning(f"Worker {wid} failed to initialize")
+                except Exception as e:
+                    logger.error(f"Worker {wid} init error: {e}")
+
+        # Update healthy workers list
+        healthy_workers = [(wid, state.workers[wid].url) for wid in init_results]
+
+        if len(healthy_workers) < 2:
+            with state_lock:
+                state.error = f"Not enough initialized workers: {len(healthy_workers)}"
+                state.running = False
+            return
+
+        # Create coordinator
         with state_lock:
             state.phase = "creating_coordinator"
 
@@ -299,7 +541,7 @@ def run_training(config: TrainRequest):
             num_workers=len(healthy_workers),
             proofs_per_step=config.K,
             use_adc=config.use_adc,
-            adc_rank=adc_rank,
+            adc_rank=config.adc_rank,
             adc_warmup_samples=20 if config.use_adc else 0,
             learning_rate=config.lr,
             device="cpu",
@@ -308,11 +550,12 @@ def run_training(config: TrainRequest):
         coordinator.set_parameters(model.get_flat_params())
 
         train_iter = iter(train_loader)
-        codebook_synced = False
 
-        for step in range(config.steps):
+        # Training loop
+        for step in range(start_step, config.steps):
             with state_lock:
                 if state.stop_requested:
+                    save_checkpoint(step, model, coordinator, state.losses, config)
                     state.phase = "stopped"
                     state.running = False
                     return
@@ -320,6 +563,7 @@ def run_training(config: TrainRequest):
 
             step_start = time.time()
 
+            # Get batch
             try:
                 batch = next(train_iter)
             except StopIteration:
@@ -331,6 +575,14 @@ def run_training(config: TrainRequest):
             coordinator.set_batch(batch.input_ids.flatten(), step)
             tasks = coordinator.publish_tasks(step)
 
+            # Refresh healthy workers list
+            healthy_workers = get_healthy_workers(state.workers)
+
+            if len(healthy_workers) < 2:
+                logger.error("No healthy workers available!")
+                time.sleep(5)
+                continue
+
             with state_lock:
                 state.phase = f"step_{step}_computing"
                 for wid in state.workers:
@@ -340,57 +592,95 @@ def run_training(config: TrainRequest):
             worker_times = {}
             scalars_this_step = []
 
-            with ThreadPoolExecutor(max_workers=len(healthy_workers) * 2) as executor:
-                futures = {}
-                for i, task in enumerate(tasks):
-                    wid, url = healthy_workers[i % len(healthy_workers)]
-                    with state_lock:
-                        state.workers[wid].busy = True
-                    future = executor.submit(
-                        client.compute_task,
-                        url,
-                        wid,
-                        step,
-                        task.seed,
-                        task.use_adc,
-                        input_ids,
-                        labels,
-                    )
-                    futures[future] = (wid, task.seed)
+            # Compute with retry logic
+            max_retries = 2
+            tasks_remaining = list(enumerate(tasks))
 
-                for future in as_completed(futures):
-                    result = future.result()
-                    wid, _ = futures[future]
+            for retry in range(max_retries + 1):
+                if not tasks_remaining:
+                    break
 
-                    with state_lock:
-                        state.workers[wid].busy = False
-
-                    if result:
+                with ThreadPoolExecutor(max_workers=len(healthy_workers) * 2) as executor:
+                    futures = {}
+                    for i, task in tasks_remaining:
+                        wid, url = healthy_workers[i % len(healthy_workers)]
                         with state_lock:
-                            state.workers[wid].tasks_completed += 1
-                            state.workers[wid].last_task_time = result.get("worker_time", 0)
-                            state.workers[wid].last_scalar = result["scalar"]
-
-                        worker_times[wid] = result.get("worker_time", 0)
-                        scalars_this_step.append(result["scalar"])
-
-                        proof = Proof(
-                            step=result["step"],
-                            worker_id=int(wid),
-                            seed=bytes.fromhex(result["seed"]),
-                            scalar=result["scalar"],
-                            timestamp=time.time(),
-                            adc_projection=np.array(result["adc_projection"])
-                            if result.get("adc_projection")
-                            else None,
+                            state.workers[wid].busy = True
+                        future = executor.submit(
+                            client.compute_task,
+                            url,
+                            wid,
+                            step,
+                            task.seed,
+                            task.use_adc,
+                            input_ids,
+                            labels,
+                            timeout=300,  # Longer timeout for large K
                         )
-                        proofs.append(proof)
-                        coordinator.collect_proof(proof)
-                    else:
-                        with state_lock:
-                            state.workers[wid].errors += 1
+                        futures[future] = (i, wid, task)
 
-            if len(proofs) < 3:
+                    completed_indices = set()
+                    try:
+                        for future in as_completed(futures, timeout=360):
+                            i, wid, task = futures[future]
+
+                            with state_lock:
+                                state.workers[wid].busy = False
+
+                            try:
+                                result = future.result(timeout=5)
+                            except Exception as e:
+                                result = None
+                                logger.warning(f"Task {i} result error: {e}")
+
+                            if result:
+                                completed_indices.add(i)
+
+                                with state_lock:
+                                    state.workers[wid].tasks_completed += 1
+                                    state.workers[wid].consecutive_errors = 0
+                                    state.workers[wid].last_task_time = result.get("worker_time", 0)
+                                    state.workers[wid].last_scalar = result["scalar"]
+
+                                worker_times[wid] = result.get("worker_time", 0)
+                                scalars_this_step.append(result["scalar"])
+
+                                proof = Proof(
+                                    step=result["step"],
+                                    worker_id=int(wid),
+                                    seed=bytes.fromhex(result["seed"]),
+                                    scalar=result["scalar"],
+                                    timestamp=time.time(),
+                                    adc_projection=np.array(result["adc_projection"])
+                                    if result.get("adc_projection")
+                                    else None,
+                                )
+                                proofs.append(proof)
+                                coordinator.collect_proof(proof)
+                            else:
+                                with state_lock:
+                                    state.workers[wid].errors += 1
+                                    state.workers[wid].consecutive_errors += 1
+                                    # Disable worker after 5 consecutive errors
+                                    if state.workers[wid].consecutive_errors >= 5:
+                                        state.workers[wid].disabled = True
+                                        logger.warning(f"Worker {wid} disabled due to errors")
+
+                    except FuturesTimeoutError:
+                        logger.warning(f"Step {step} timeout on retry {retry}")
+
+                    # Update tasks remaining
+                    tasks_remaining = [
+                        (i, task) for i, task in tasks_remaining if i not in completed_indices
+                    ]
+
+                if tasks_remaining and retry < max_retries:
+                    logger.info(f"Retrying {len(tasks_remaining)} failed tasks")
+                    time.sleep(1)
+
+            # Check if we have enough proofs
+            if len(proofs) < max(2, config.K // 4):
+                logger.warning(f"Step {step}: only {len(proofs)} proofs, skipping")
                 with state_lock:
                     state.phase = f"step_{step}_insufficient_proofs"
                 continue
@@ -401,11 +691,8 @@ def run_training(config: TrainRequest):
             gradient, agg_result = coordinator.aggregate()
             gradient_norm = float(np.linalg.norm(gradient))
 
-            # Log aggregation details
-            logger.info(f"[Step {step}] Aggregated {len(proofs)} proofs")
-            logger.info(f"[Step {step}] Gradient norm: {gradient_norm:.6f}")
             logger.info(
-                f"[Step {step}] Scalars: mean={np.mean(scalars_this_step):.6f}, std={np.std(scalars_this_step):.6f}"
+                f"[Step {step}] Aggregated {len(proofs)}/{config.K} proofs, grad_norm={gradient_norm:.6f}"
             )
 
             with state_lock:
@@ -414,97 +701,58 @@ def run_training(config: TrainRequest):
             new_params = coordinator.update_parameters(gradient)
             model.set_flat_params(new_params)
 
+            # Codebook sync after warmup
             if coordinator.codebook and coordinator.codebook.is_warmed_up and not codebook_synced:
-                # Sync learned codebook to all workers
                 with state_lock:
                     state.phase = f"step_{step}_syncing_codebook"
 
-                logger.info(f"[Step {step}] ADC warmup complete! Syncing codebook to workers...")
-                codebook_U = coordinator.codebook.codebook  # rank x dimension matrix
-                logger.info(
-                    f"[Step {step}] Codebook shape: {codebook_U.shape}, size: {codebook_U.nbytes / 1024 / 1024:.1f}MB"
-                )
+                logger.info(f"[Step {step}] Syncing codebook to workers...")
 
-                # Send codebook to each worker using base64-encoded binary for efficiency
-                # Use int8 quantization to reduce size by 4x (from float32)
                 import base64
 
-                # Quantize to int8: scale to [-127, 127] range
+                codebook_U = coordinator.codebook.codebook
                 codebook_max = np.max(np.abs(codebook_U))
                 codebook_scale = codebook_max / 127.0 if codebook_max > 0 else 1.0
                 codebook_int8 = (codebook_U / codebook_scale).astype(np.int8)
-                codebook_bytes = codebook_int8.tobytes()
-                codebook_b64 = base64.b64encode(codebook_bytes).decode("ascii")
-                logger.info(
-                    f"[Step {step}] Codebook encoded size: {len(codebook_b64) / 1024 / 1024:.1f}MB (int8 quantized)"
-                )
+                codebook_b64 = base64.b64encode(codebook_int8.tobytes()).decode("ascii")
 
-                # Use as_completed with short timeout for non-blocking partial sync
                 sync_count = 0
-                sync_timeout = 60  # seconds per worker
-                min_sync_required = max(3, len(healthy_workers) // 2)  # At least 50% or 3 workers
-
                 with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
                     futures = {}
                     for wid, url in healthy_workers:
                         future = executor.submit(
-                            lambda u, w: (
-                                w,
-                                client.session.post(
-                                    f"{u}/update_codebook_b64",
-                                    json={
-                                        "U_b64": codebook_b64,
-                                        "rank": coordinator.codebook.rank,
-                                        "dimension": coordinator.codebook.dimension,
-                                        "dtype": "int8",
-                                        "scale": float(codebook_scale),
-                                    },
-                                    timeout=sync_timeout,
-                                ),
-                            ),
+                            client.sync_codebook,
                             url,
-                            wid,
+                            codebook_b64,
+                            coordinator.codebook.rank,
+                            coordinator.codebook.dimension,
+                            float(codebook_scale),
                         )
                         futures[future] = wid
 
-                    for future in as_completed(futures, timeout=sync_timeout + 10):
+                    for future in as_completed(futures, timeout=180):
                         wid = futures[future]
                         try:
-                            worker_id, resp = future.result(timeout=5)
-                            if resp.status_code == 200:
+                            if future.result():
                                 sync_count += 1
-                                logger.info(f"[Step {step}] Codebook synced to {worker_id}")
+                                logger.info(f"Codebook synced to {wid}")
                         except Exception as e:
-                            logger.error(f"[Step {step}] Failed to sync codebook to {wid}: {e}")
+                            logger.warning(f"Codebook sync failed for {wid}: {e}")
 
-                logger.info(
-                    f"[Step {step}] Codebook synced to {sync_count}/{len(healthy_workers)} workers"
-                )
-
-                if sync_count >= min_sync_required:
+                if sync_count >= max(2, len(healthy_workers) // 2):
                     codebook_synced = True
                     with state_lock:
                         state.codebook_synced = True
                         state.adc_warmed_up = True
-                        state.adc_warmup_current = state.adc_warmup_needed
-                    logger.info(
-                        f"[Step {step}] ADC enabled! Codebook synced to {sync_count} workers."
-                    )
-                else:
-                    logger.warning(
-                        f"[Step {step}] Only {sync_count} workers synced, need {min_sync_required}. Continuing without ADC."
-                    )
+                    logger.info(f"ADC enabled! Synced to {sync_count} workers")
 
-            with state_lock:
-                if not codebook_synced and coordinator.codebook:
-                    state.adc_warmup_current = min(step + 1, state.adc_warmup_needed)
-
+            # Sync gradient to workers
             use_adc = codebook_synced and coordinator.codebook is not None
             seeds_hex = [p.seed.hex() for p in proofs]
             scalars_list = [p.scalar for p in proofs]
 
             with state_lock:
-                state.phase = f"step_{step}_syncing"
+                state.phase = f"step_{step}_syncing_params"
 
             with ThreadPoolExecutor(max_workers=len(healthy_workers)) as executor:
                 list(
@@ -519,21 +767,8 @@ def run_training(config: TrainRequest):
             loss_val = model.compute_loss(batch.input_ids, batch.labels)
             step_time = time.time() - step_start
 
-            logger.info(f"[Step {step}] Loss: {loss_val:.4f}, Step time: {step_time:.2f}s")
             logger.info(
-                f"[Step {step}] ADC warmed up: {codebook_synced}, use_adc: {config.use_adc}"
-            )
-
-            step_detail = StepDetail(
-                step=step,
-                loss=loss_val,
-                proofs_collected=len(proofs),
-                proofs_needed=config.K,
-                gradient_norm=gradient_norm,
-                scalars=scalars_this_step,
-                worker_times=worker_times,
-                step_time=step_time,
-                phase="warmup" if not codebook_synced else "training",
+                f"[Step {step}] Loss: {loss_val:.4f}, Time: {step_time:.1f}s, Proofs: {len(proofs)}/{config.K}"
             )
 
             with state_lock:
@@ -551,22 +786,26 @@ def run_training(config: TrainRequest):
                         "gradient_norm": round(gradient_norm, 6),
                         "proofs": len(proofs),
                         "step_time": round(step_time, 2),
-                        "scalars_mean": round(np.mean(scalars_this_step), 6)
-                        if scalars_this_step
-                        else 0,
-                        "scalars_std": round(np.std(scalars_this_step), 6)
-                        if scalars_this_step
-                        else 0,
                     }
                 )
+
+                if not codebook_synced and coordinator.codebook:
+                    state.adc_warmup_current = min(step + 1, state.adc_warmup_needed)
 
                 if scalars_this_step:
                     state.scalar_stats = {
                         "mean": round(float(np.mean(scalars_this_step)), 6),
                         "std": round(float(np.std(scalars_this_step)), 6),
-                        "min": round(float(np.min(scalars_this_step)), 6),
-                        "max": round(float(np.max(scalars_this_step)), 6),
                     }
+
+            # Save checkpoint periodically
+            if config.checkpoint_every > 0 and (step + 1) % config.checkpoint_every == 0:
+                save_checkpoint(step + 1, model, coordinator, state.losses, config)
+                with state_lock:
+                    state.last_checkpoint_step = step + 1
+
+        # Final checkpoint
+        save_checkpoint(config.steps, model, coordinator, state.losses, config)
 
         with state_lock:
             state.phase = "completed"
@@ -607,11 +846,10 @@ def get_status():
             workers_summary[wid] = {
                 "healthy": ws.healthy,
                 "initialized": ws.initialized,
+                "disabled": ws.disabled,
                 "tasks": ws.tasks_completed,
                 "errors": ws.errors,
                 "busy": ws.busy,
-                "last_time": round(ws.last_task_time, 2),
-                "last_scalar": round(ws.last_scalar, 6),
             }
 
         return {
@@ -624,28 +862,20 @@ def get_status():
             else 0,
             "loss": round(state.loss, 4),
             "avg_loss_10": round(float(avg_loss), 4),
-            "loss_trend": "↓"
-            if len(state.losses) > 5 and np.mean(state.losses[-5:]) < np.mean(state.losses[-10:-5])
-            else "→",
             "step_time": round(state.step_time, 2),
             "elapsed": round(state.elapsed, 1),
-            "eta": round((state.total_steps - state.step) * state.step_time, 0)
+            "eta_seconds": round((state.total_steps - state.step) * state.step_time, 0)
             if state.step_time > 0
             else 0,
             "proofs": state.proofs_count,
             "K": state.K,
+            "model_params": state.model_params,
             "adc": {
                 "warmed_up": state.adc_warmed_up,
-                "warmup_progress": f"{state.adc_warmup_current}/{state.adc_warmup_needed}",
                 "codebook_synced": state.codebook_synced,
             },
-            "gradient": {
-                "norm": round(state.gradient_norms[-1], 6) if state.gradient_norms else 0,
-                "avg_norm": round(float(avg_grad_norm), 6),
-            },
-            "scalars": state.scalar_stats,
-            "model_params": state.model_params,
-            "learning_rate": state.learning_rate,
+            "workers": workers_summary,
+            "last_checkpoint": state.last_checkpoint_step,
             "error": state.error,
         }
 
@@ -659,19 +889,13 @@ def get_workers():
                 "url": ws.url,
                 "healthy": ws.healthy,
                 "initialized": ws.initialized,
+                "disabled": ws.disabled,
                 "tasks_completed": ws.tasks_completed,
                 "errors": ws.errors,
+                "consecutive_errors": ws.consecutive_errors,
                 "busy": ws.busy,
-                "last_task_time": round(ws.last_task_time, 3),
-                "last_scalar": round(ws.last_scalar, 6),
             }
         return result
-
-
-@app.get("/steps")
-def get_recent_steps():
-    with state_lock:
-        return {"recent_steps": list(state.recent_steps)}
 
 
 @app.get("/losses")
@@ -683,52 +907,6 @@ def get_losses():
         }
 
 
-@app.get("/analysis")
-def get_analysis():
-    with state_lock:
-        if len(state.losses) < 10:
-            return {"message": "Not enough data yet"}
-
-        losses = np.array(state.losses)
-        grad_norms = np.array(state.gradient_norms) if state.gradient_norms else np.array([])
-
-        return {
-            "loss_analysis": {
-                "initial": round(float(losses[0]), 4) if len(losses) > 0 else 0,
-                "current": round(float(losses[-1]), 4) if len(losses) > 0 else 0,
-                "min": round(float(np.min(losses)), 4),
-                "max": round(float(np.max(losses)), 4),
-                "mean": round(float(np.mean(losses)), 4),
-                "std": round(float(np.std(losses)), 4),
-                "improvement": round(float(losses[0] - losses[-1]), 4) if len(losses) > 0 else 0,
-                "improvement_pct": round(float((losses[0] - losses[-1]) / losses[0] * 100), 2)
-                if len(losses) > 0 and losses[0] != 0
-                else 0,
-            },
-            "gradient_analysis": {
-                "mean_norm": round(float(np.mean(grad_norms)), 6) if len(grad_norms) > 0 else 0,
-                "std_norm": round(float(np.std(grad_norms)), 6) if len(grad_norms) > 0 else 0,
-                "min_norm": round(float(np.min(grad_norms)), 6) if len(grad_norms) > 0 else 0,
-                "max_norm": round(float(np.max(grad_norms)), 6) if len(grad_norms) > 0 else 0,
-            },
-            "convergence": {
-                "is_converging": bool(
-                    len(losses) > 20 and np.mean(losses[-10:]) < np.mean(losses[:10])
-                ),
-                "loss_variance_recent": round(float(np.var(losses[-10:])), 6)
-                if len(losses) >= 10
-                else 0,
-            },
-            "explanation": {
-                "why_loss_high": "Random projections capture only ~0.0002% of gradient energy in 3M dimensions. ADC warmup helps focus on important subspace.",
-                "why_slow_convergence": f"With K={state.K} proofs and D={state.model_params} params, effective SNR is low. Need more K or smaller model.",
-                "adc_status": "ADC is warmed up - using learned subspace"
-                if state.adc_warmed_up
-                else f"ADC warming up ({state.adc_warmup_current}/{state.adc_warmup_needed}). Using random directions.",
-            },
-        }
-
-
 @app.post("/stop")
 def stop_training():
     global state
@@ -736,7 +914,22 @@ def stop_training():
         if not state.running:
             return {"status": "not running"}
         state.stop_requested = True
-    return {"status": "stop requested"}
+    return {"status": "stop requested, will checkpoint and stop"}
+
+
+@app.get("/checkpoints")
+def list_checkpoints():
+    checkpoints = []
+    if CHECKPOINT_DIR.exists():
+        for f in CHECKPOINT_DIR.glob("checkpoint_*.npz"):
+            checkpoints.append(
+                {
+                    "path": str(f),
+                    "name": f.name,
+                    "size_mb": round(f.stat().st_size / 1024 / 1024, 2),
+                }
+            )
+    return {"checkpoints": sorted(checkpoints, key=lambda x: x["name"])}
 
 
 if __name__ == "__main__":
