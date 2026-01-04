@@ -80,7 +80,7 @@
 \begin{abstract}
 Large-scale language model (LLM) pretraining is bottlenecked by high-dimensional gradient/parameter tensor synchronization and straggler effects, effectively restricting training to data-center-grade clusters. We propose \emph{HoloGrad}, a protocol and system that replaces tensor communication with \emph{verifiable scalar proofs} based on gradient projections (directional derivatives). Each worker submits only a seed and a scalar projection value, while the coordinator reconstructs directions from seeds and aggregates updates via linear synthesis. We introduce \emph{Proof-of-Gradient-Projection (PoGP)}: a sampling-based verification mechanism enabling low-cost validation and incentive-compatible accounting in a mining-style open network.
 
-We identify a fundamental challenge: for neural networks, gradient directions vary significantly across mini-batches (pairwise cosine similarity $\approx 0.07$), preventing random-direction estimators from achieving efficient reconstruction when $K \ll D$. To address this, we propose two complementary variants: (i) \emph{HoloGrad-ADC} with an Adaptive Direction Codebook for settings where gradients occupy a stable low-rank subspace, and (ii) \emph{Momentum-Centric HoloGrad}, which projects onto a shared momentum direction, reducing communication to a single scalar per worker while achieving meaningful convergence ($\approx 30$--$40\%$ of full SGD efficiency). We provide descent guarantees, analyze verification/slashing parameters, and present reproducible experiments demonstrating when each variant is appropriate.
+We identify a fundamental challenge: for neural networks, gradient directions vary significantly across mini-batches (pairwise cosine similarity $\approx 0.28$), preventing random-direction estimators from achieving efficient reconstruction when $K \ll D$. To address this, we propose two complementary variants: (i) \emph{HoloGrad-ADC} with an Adaptive Direction Codebook for settings where gradients occupy a stable low-rank subspace, and (ii) \emph{Momentum-Centric HoloGrad}, which projects onto a shared momentum direction, reducing communication to a single scalar per worker while achieving meaningful convergence ($\approx 30$--$40\%$ of full SGD efficiency). We provide descent guarantees, analyze verification/slashing parameters, and present reproducible experiments demonstrating when each variant is appropriate.
 \end{abstract}
 
 \section{Introduction}
@@ -98,7 +98,7 @@ a = \ip{\nabla_{\thetaVec}\Lcal_B(\thetaVec)}{\vdir}, \quad a\in\R
 where $\vdir$ is deterministically generated from a public seed. The coordinator reconstructs $\vdir$ and synthesizes updates from scalar-direction pairs. Directional-derivative-based gradient estimators are connected to forward-mode AD and "gradients without backpropagation" directions \cite{baydin2022gradients,shukla2023randomized}.
 
 \paragraph{Neural network challenge.}
-While random projection estimators are unbiased in expectation, they face a fundamental obstacle in neural network training: \emph{gradient directions vary dramatically across mini-batches}. Empirically, we observe pairwise cosine similarities of only $\approx 0.07$ between gradients from different batches. This near-orthogonality implies that no fixed low-rank subspace captures most gradient energy across batches, causing both random-direction estimators (when $K \ll D$) and learned codebooks (ADC) to struggle. In contrast, training momentum---which accumulates past gradient information---provides a stable, informative direction that captures meaningful signal.
+While random projection estimators are unbiased in expectation, they face a fundamental obstacle in neural network training: \emph{gradient directions vary significantly across mini-batches}. Empirically, we observe pairwise cosine similarities of $\approx 0.28$ between gradients from different batches. This relatively low correlation implies that no fixed low-rank subspace captures most gradient energy across batches, causing both random-direction estimators (when $K \ll D$) and learned codebooks (ADC) to struggle. In contrast, training momentum---which accumulates past gradient information---provides a stable, informative direction that captures meaningful signal.
 
 \paragraph{Contributions.}
 We present two complementary HoloGrad variants:
@@ -319,12 +319,12 @@ The theoretical guarantees of HoloGrad assume that either (i) enough random dire
 
 We computed gradients on a GPT-2-small model across 50 independent mini-batches and measured pairwise cosine similarities. The results are striking:
 \begin{itemize}[leftmargin=*]
-  \item \textbf{Pairwise cosine similarity}: $\approx 0.07$ (nearly orthogonal)
+  \item \textbf{Pairwise cosine similarity}: $\approx 0.28$ (low correlation)
   \item \textbf{Leave-one-out SVD reconstruction}: $\approx 0.24$ cosine similarity
   \item \textbf{Gradient variance ratio}: $\frac{\|\E[\g_B] - \g_B\|^2}{\|\g_B\|^2} \approx 0.93$
 \end{itemize}
 
-This implies that gradients from different mini-batches point in nearly independent directions in the $D$-dimensional parameter space.
+This implies that gradients from different mini-batches have low but non-negligible correlation in the $D$-dimensional parameter space.
 
 \subsection{Implications for random projections}
 
