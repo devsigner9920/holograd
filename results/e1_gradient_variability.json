@@ -1,0 +1,24 @@
+{
+  "config": {
+    "n_layer": 4,
+    "n_head": 4,
+    "n_embd": 256,
+    "seq_length": 64,
+    "batch_size": 4,
+    "num_gradients": 30
+  },
+  "timestamp": "2026-01-04T14:20:27.110362",
+  "model_params": 16032512,
+  "pairwise_cosine": {
+    "mean": 0.3305838757890394,
+    "std": 0.08587925577662428,
+    "min": 0.17617815732955933,
+    "max": 0.8395420908927917,
+    "median": 0.3166831433773041
+  },
+  "momentum_mean_cosine": 0.5390939116477966,
+  "momentum_ema_cosine": 0.5213803648948669,
+  "claim_c2_status": "FAILED",
+  "claim_c2_expected": 0.07,
+  "claim_c2_actual": 0.3305838757890394
+}
