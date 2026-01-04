@@ -1,0 +1,31 @@
+{
+  "experiment": "E1-GPT2",
+  "model": "GPT2-small (124M params)",
+  "config": {
+    "n_layer": 12,
+    "n_head": 12,
+    "n_embd": 768,
+    "params": 123668736
+  },
+  "results": {
+    "mean_cosine": 0.3136,
+    "std_cosine": 0.0777,
+    "min_cosine": 0.0938,
+    "max_cosine": 0.5438,
+    "median_cosine": 0.3163
+  },
+  "paper_claim": {
+    "expected_cosine": 0.07,
+    "claim": "C2: Gradients are nearly orthogonal"
+  },
+  "verification": {
+    "status": "FAILED",
+    "reason": "Measured cosine (0.31) is 4.5x higher than paper claim (0.07)"
+  },
+  "run_info": {
+    "date": "2026-01-04",
+    "gpu": "RTX 4090",
+    "platform": "vast.ai",
+    "gradients_collected": 50
+  }
+}
