@@ -194,8 +194,38 @@ Let $\hat{\g}(\vdir) = \frac{1}{\sigma^2}(\g\cdot \vdir)\vdir$. Under Assumption
 \]
 \end{proof}
 
+\begin{lemma}[Variance of directional estimator]\label{lem:variance}
+Let $\vdir$ be a unit-norm isotropic direction with $\E[\vdir\vdir^\top]=\frac{1}{D}I$ (so $\sigma^2=1/D$). For the single-direction estimator $\hat{\g}(\vdir)=D(\g\cdot\vdir)\vdir$:
+\[
+\E\bigl[\norm{\hat{\g}(\vdir)-\g}^2\bigr] = (D-1)\norm{\g}^2.
+\]
+For the $K$-direction average $\widehat{\g}_K = \frac{1}{K}\sum_{j=1}^K \hat{\g}(\vdir_j)$ with i.i.d. directions:
+\[
+\E\bigl[\norm{\widehat{\g}_K - \g}^2\bigr] = \frac{D-1}{K}\norm{\g}^2.
+\]
+\end{lemma}
+\begin{proof}
+For a single direction, the MSE decomposes as:
+\begin{align*}
+\E[\norm{\hat{\g}(\vdir)}^2] &= D^2 \E[(\g\cdot\vdir)^2] = D^2 \cdot \g^\top\E[\vdir\vdir^\top]\g = D^2 \cdot \frac{\norm{\g}^2}{D} = D\norm{\g}^2.
+\end{align*}
+Since the estimator is unbiased (Theorem~\ref{thm:unbiased}), the MSE equals the variance:
+\[
+\E[\norm{\hat{\g}(\vdir)-\g}^2] = \E[\norm{\hat{\g}(\vdir)}^2] - \norm{\g}^2 = (D-1)\norm{\g}^2.
+\]
+For $K$ i.i.d. directions, the variance of the average scales as $1/K$.
+\end{proof}
+
+\begin{corollary}[Expected cosine similarity]\label{cor:cosine}
+Under the conditions of Lemma~\ref{lem:variance}, the expected cosine similarity between $\widehat{\g}_K$ and $\g$ satisfies:
+\[
+\E\!\left[\frac{\ip{\widehat{\g}_K}{\g}}{\norm{\widehat{\g}_K}\norm{\g}}\right] \approx \sqrt{\frac{K}{D}} \quad \text{for } K \ll D.
+\]
+\end{corollary}
+This explains why random projections require $K$ on the order of $D$ to achieve high cosine similarity with the true gradient---impractical for large models.
+
 \paragraph{Variance and sample size.}
-With i.i.d. directions, $\widehat{\g} = \frac{1}{K}\sum_{j=1}^K \hat{\g}(\vdir_j)$ has variance scaling $O(1/K)$; heavy tails increase the constant factors \cite{shukla2023randomized}.
+Lemma~\ref{lem:variance} formalizes that with i.i.d. directions, $\widehat{\g}_K$ has MSE scaling as $(D-1)/K$. The relative error $\norm{\widehat{\g}_K - \g}/\norm{\g}$ scales as $\sqrt{D/K}$, which is large when $K \ll D$. Heavy-tailed gradient distributions increase the constant factors \cite{shukla2023randomized,ren2022scaling}.
 
 \subsection{Adaptive Direction Codebook (ADC)}
 Random directions can be sample-inefficient in high dimensions. We restrict directions to a learned low-rank subspace.
