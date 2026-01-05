@@ -135,6 +135,13 @@ Let $\thetaVec\in\R^D$ be model parameters, $\Lcal_B(\thetaVec)$ the minibatch l
 
 \section{HoloGrad and PoGP Protocol}
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.95\textwidth]{figures/fig6_protocol.pdf}
+\caption{HoloGrad protocol overview. Workers compute scalar projections $a = \langle g, v \rangle$ and submit proofs to the coordinator. The coordinator reconstructs directions from seeds and synthesizes gradient updates. PoGP verification enables sampling-based proof checking.}
+\label{fig:protocol}
+\end{figure}
+
 \subsection{Seeded direction generation (fixed)}
 A public seed $s$ defines a direction via a deterministic generator
 \[
@@ -741,6 +748,13 @@ $K$ & $K/D$ & \textbf{Theory} $\sqrt{K/D}$ & \textbf{Observed} \\
 \paragraph{Interpretation.}
 Observed cosine similarity is significantly lower than the theoretical $\sqrt{K/D}$ bound (10--100$\times$ gap). This discrepancy arises because Corollary~\ref{cor:cosine} describes expected behavior over many trials; a single reconstruction exhibits high variance. The result underscores that random projections are impractical for $K \ll D$, strongly motivating the momentum-centric approach.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig1_k_sweep.pdf}
+\caption{Reconstruction quality vs number of directions $K$. Theoretical bound $\sqrt{K/D}$ (dashed) vs observed cosine similarity (solid). The 10--100$\times$ gap demonstrates high variance in random projection estimators.}
+\label{fig:k-sweep}
+\end{figure}
+
 \subsection{E3: Momentum-Centric vs Random Directions}
 \label{sec:exp-momentum}
 
@@ -769,6 +783,13 @@ Random $K=64$ & 0.062 & 64 & -- \\
 \paragraph{Interpretation.}
 Momentum-centric projection achieves $8\times$ higher alignment than random $K=1$ with identical communication cost. Compared to random $K=64$, momentum $K=1$ achieves similar alignment ($0.053$ vs $0.062$) with $64\times$ less communication. This validates the momentum-centric variant as the practical choice for neural network training.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig2_momentum_comparison.pdf}
+\caption{Momentum-centric vs random direction projections. Momentum achieves $8\times$ higher gradient alignment with identical communication (1 scalar/worker). This validates momentum-centric HoloGrad for neural network training.}
+\label{fig:momentum-comparison}
+\end{figure}
+
 \subsection{E4: ADC Captured Energy}
 \label{sec:exp-adc}
 
@@ -781,6 +802,13 @@ Initial $\gamma_0 \approx 0.006$ (0.6\%), remaining low ($<1\%$) after 20 update
 
 \paragraph{Interpretation.}
 ADC exhibits a significant \emph{cold-start problem}: random initialization captures negligible gradient energy, and learning the correct subspace requires many samples. This motivates the bootstrap warmup strategy (Section~\ref{sec:adc-init}). Once initialized properly (e.g., via SVD of gradient history), ADC achieves $\gamma \approx 1.0$ as observed in our distributed training experiments.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig4_adc_energy.pdf}
+\caption{ADC captured energy $\gamma_t = \|\U\U^\top \g\|^2 / \|\g\|^2$ over Oja updates. Random initialization leads to cold-start ($\gamma \approx 0.6\%$); proper bootstrap initialization achieves $\gamma \approx 1.0$.}
+\label{fig:adc-energy}
+\end{figure}
 
 \subsection{E5: Unbiased Estimator Verification}
 \label{sec:exp-unbiased}
@@ -851,6 +879,13 @@ Values represent cosine similarity with true gradient (higher is better).
 \paragraph{Interpretation.}
 Trimmed-mean aggregation provides strong defense against random and scaled attacks, recovering most of the true gradient signal. Sign-flip attacks are harder to defend against with simple trimming, as they produce in-distribution but adversarial values. More sophisticated defenses (coordinate-wise median, Krum) may be needed for such attacks.
 
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig3_byzantine.pdf}
+\caption{Byzantine fault tolerance with trimmed-mean aggregation ($\tau=0.15$). Cosine similarity with true gradient under different attack types and 20\% Byzantine workers. Trimmed-mean recovers 94\% alignment under random attacks.}
+\label{fig:byzantine}
+\end{figure}
+
 \subsection{Distributed Training Results}
 \label{sec:exp-distributed}
 
@@ -881,6 +916,13 @@ Communication & 16 scalars/step \\
 
 \paragraph{Interpretation.}
 HoloGrad successfully trains in a distributed setting with ADC achieving perfect energy capture ($\gamma = 1.0$) after initialization. The modest loss improvement (0.1\%) over 50 steps is expected for this scale; longer training would show continued convergence. The key validation is that the protocol \emph{works end-to-end}: workers compute scalar proofs, the coordinator aggregates and updates, and the model improves.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.8\textwidth]{figures/fig5_distributed.pdf}
+\caption{Distributed training loss on GPT-2 Tiny (1.6M parameters) with 10 RTX 4090 workers across Vast.ai. HoloGrad with $K=16$ directions and ADC ($r=32$) achieves stable training with $\gamma=1.0$ energy capture.}
+\label{fig:distributed}
+\end{figure}
 
 \subsection{Summary of Experimental Findings}
 
