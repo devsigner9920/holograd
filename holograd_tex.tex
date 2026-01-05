@@ -107,8 +107,25 @@ We present two complementary HoloGrad variants:
   \item \textbf{Momentum-Centric HoloGrad}: Projects each worker's gradient onto a shared momentum direction, reducing communication to a \emph{single scalar per worker}. Achieves $\approx 30$--$40\%$ of full SGD efficiency while being $64\times$ more communication-efficient than random projections.
 \end{itemize}
 
+\paragraph{Trust assumption.}
+Both variants require initialization: ADC needs an initial codebook, and momentum-centric requires an initial momentum direction. We discuss warmup strategies in Section~\ref{sec:adc-init}, including a bootstrap phase using true gradients that is \emph{not} subject to PoGP verification. This represents a one-time trust assumption; the subsequent protocol remains fully verifiable.
+
 \section{Related Work}
-Directional-derivative / forward-mode gradient construction has been studied as an alternative to backpropagation \cite{baydin2022gradients,shukla2023randomized}. Communication-efficient distributed optimization includes sign-based methods such as signSGD \cite{bernstein2018signsgd}. Locking-free training via synthetic gradients decouples modules \cite{jaderberg2017dni}. Our contribution differs by \emph{protocolizing} directional-derivative scalars into verifiable proofs with economic enforcement and by specifying a fixed adaptive direction codebook update rule (Streaming Oja-QR) for sample-efficiency.
+
+\paragraph{Forward-mode gradients and variance reduction.}
+Directional-derivative / forward-mode gradient construction has been studied as an alternative to backpropagation \cite{baydin2022gradients,shukla2023randomized}. A key challenge is high variance in high-dimensional settings \cite{ren2022scaling}. Bacho \& Chu \cite{bacho2022lowvariance} propose using momentum directions with Direct Feedback Alignment to reduce variance---conceptually similar to our momentum-centric variant. Our contribution differs in \emph{protocolizing} these scalars into verifiable proofs with economic enforcement, rather than focusing solely on training efficiency.
+
+\paragraph{Gradient compression.}
+Communication-efficient distributed optimization includes sign-based methods such as signSGD \cite{bernstein2018signsgd} and sparsification approaches like Deep Gradient Compression \cite{lin2017deep}, which achieves 270--600$\times$ compression via momentum correction. HoloGrad's compression ratio ($K$ scalars vs $D$ parameters) is more modest, but uniquely provides cryptographic verifiability through the PoGP protocol.
+
+\paragraph{Streaming PCA and Oja's algorithm.}
+Our Adaptive Direction Codebook (ADC) uses streaming Oja updates with periodic QR orthonormalization. The theoretical foundations of Oja's algorithm are established in \cite{jain2016streaming,huang2021streaming}, providing near-optimal finite-sample guarantees for streaming PCA.
+
+\paragraph{Byzantine fault tolerance.}
+Robust aggregation under adversarial workers has been extensively studied \cite{yang2019byzantine}. We adopt trimmed-mean aggregation for its simplicity and proven guarantees, though other aggregators (coordinate-wise median, Krum) are compatible with the PoGP framework.
+
+\paragraph{Synthetic gradients.}
+Locking-free training via synthetic gradients decouples modules \cite{jaderberg2017dni}. Unlike synthetic gradients which learn gradient predictors, HoloGrad reconstructs gradients from verified scalar projections.
 
 \section{Problem Formulation and Notation}
 Let $\thetaVec\in\R^D$ be model parameters, $\Lcal_B(\thetaVec)$ the minibatch loss, and $\Lcal(\thetaVec)=\E_B[\Lcal_B(\thetaVec)]$ the population objective. Let $\g_B(\thetaVec)=\nabla_{\thetaVec}\Lcal_B(\thetaVec)$ and $\g(\thetaVec)=\nabla_{\thetaVec}\Lcal(\thetaVec)$.
