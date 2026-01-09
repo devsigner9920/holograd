@@ -255,7 +255,7 @@ class WorkerClient:
                     "adc_rank": adc_rank,
                     "codebook_seed": codebook_seed,
                 },
-                timeout=120,  # Model init can take time
+                timeout=600,
             )
             if resp.status_code == 200:
                 return True, resp.json()
@@ -405,9 +405,9 @@ def run_training(config: TrainRequest):
         with state_lock:
             state.phase = "discovering_workers"
 
-        WORKERS = discover_workers()
+        WORKERS = load_workers_from_env()
         if not WORKERS:
-            WORKERS = load_workers_from_env()
+            WORKERS = discover_workers()
 
         if not WORKERS:
             with state_lock:
@@ -647,7 +647,7 @@ def run_training(config: TrainRequest):
 
                                 proof = Proof(
                                     step=result["step"],
-                                    worker_id=int(wid),
+                                    worker_id=hash(wid) % 10000,
                                     seed=bytes.fromhex(result["seed"]),
                                     scalar=result["scalar"],
                                     timestamp=time.time(),
